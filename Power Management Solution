@@ -1,0 +1,53 @@
+I've been chewing on the power problem for this thing. (It's going to be a hog). However, the goal of having AI onboard isn't to show off, it's to say, "Hey, something's not right you should take a look and a warning of immediate danger to the human/group," without you needing to Google whether 1200ppm CO₂ is bad (spoiler: it is after a bit).
+
+But here's the catch: if the AI runs 24/7, the battery's toast in an hour or two.
+
+So here's my solution:
+
+A Three-Tier Power System...
+
+Tier 1 – Basic Threshold Monitoring
+Always on. No AI, just dumb math: “Is radiation high?” “Is CO₂ dangerous?” If yes, flag it. This barely sips power and helps you know when to GTFO.
+Battery: 24+ hours.
+
+Tier 2 – “Something’s Weird” Detection
+This is the AI’s cue. When multiple sensors go funky (say, pressure drops and VOCs spike), the Coral spins up, analyzes the pattern, and tells you what’s likely going on in plain English. Then it shuts back down. More power draw here, but it only runs as needed.
+Battery: 8–12 hours, depending on how much weirdness you run into.
+
+Tier 3 – Full Analysis Mode
+Everything wakes up: full AI, screen, every sensor, the whole nine yards. For serious events or user-triggered deep dives. This burns battery quick, but that’s expected.
+Battery: 1–2 hours max.
+
+Smarter Display Use: (this is huge)
+Screen stays off unless:
+
+Something’s actually wrong
+
+You press a button
+
+The AI has something important to say
+
+Otherwise, a simple red heartbeat LED handles status.
+
+Sensor Prioritization:
+Not every sensor needs to run constantly:
+
+Critical: Radiation, CO₂ – always monitored
+
+Environmental: Temp, humidity – checked periodically (can power off with MOSFET)
+
+Secondary: Sound, magnetism – only wake up when needed
+
+Power Targets (aiming for these):
+
+Normal field use: 24+ hours
+
+Monitoring mode: 8-12 hours (screen off, AI rarely active)
+
+Emergency mode: 1–2 hours (everything running full blast)
+
+Main idea: Most of the time, nothing interesting is happening. The device should act like it—no one wants a gadget that dies early or screams about nothing.
+
+Next up: finish the sensor PCB layout, Switch PCB, and figure out the Coral’s power switching. Still not a great programmer, but the hardware’s shaping up.
+
+Next up is finishing the sensor PCB layout, Switch PCB and figuring out the Coral's power switching. I'm still no great programmer, but the hardware's shaping up.
