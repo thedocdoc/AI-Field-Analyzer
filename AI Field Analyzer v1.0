@@ -1,0 +1,114 @@
+"""
+AI Field Analyzer v1.0 - Rugged & Portable AI-Enabled Field Instrument
+-----------------------------------------------------------------
+A robust and intelligent sensor platform designed for real-world environmental analysis.
+Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
+Engineered for durability, precision, and usability in demanding field conditions.
+
+Project Link: https://hackaday.io/project/203273-ai-field-analyzer
+
+MIT License (See LICENSE file for details)
+
+© 2025 Apollo Timbers. All rights reserved.
+"""
+
+import time
+import board
+import busio
+import digitalio
+import adafruit_sgp30
+
+# **Geiger Counter Setup**
+geiger_pin = board.GP7
+led_pin = board.GP13
+piezo_pin = board.GP1
+pulse_count = 0
+count_duration = 120  # 2 minutes in seconds
+alpha = 53.032  # uSv to CPM conversion factor
+last_pulse_time = 0
+cpm = 0
+uSv_h = 0.0
+
+geiger_sensor = digitalio.DigitalInOut(geiger_pin)
+geiger_sensor.switch_to_input(pull=digitalio.Pull.UP)
+
+led = digitalio.DigitalInOut(led_pin)
+led.switch_to_output()
+
+piezo = digitalio.DigitalInOut(piezo_pin)
+piezo.switch_to_output()
+
+# **SGP30 Air Quality Sensor Setup**
+i2c = busio.I2C(board.GP5, board.GP4)
+sgp30 = adafruit_sgp30.Adafruit_SGP30(i2c)
+sgp30.iaq_init()
+
+# **Startup Countdown**
+def sensor_startup_timer(seconds):
+    for i in range(seconds, 0, -1):
+        print(f"\r⌛ Sensor Ready in {i}s...", end="")
+        time.sleep(1)
+    print("\r✅ Sensors Ready!")
+
+# **Air Quality Warnings**
+def get_warning(eCO2, TVOC):
+    warnings = []
+    warnings.append("✅ Excellent air quality.") if eCO2 < 1000 else warnings.append("⚠️ CO₂ rising—ventilate soon.") if eCO2 < 2000 else warnings.append("🚨 Dangerous CO₂ levels!")
+    warnings.append("✅ Air is clean.") if TVOC < 500 else warnings.append("⚠️ Chemical odors detected.") if TVOC < 2000 else warnings.append("🚨 High VOC levels!")
+    return warnings
+
+# **Radiation Warnings**
+def get_radiation_warning(uSv_h):
+    if uSv_h < 0.5:
+        return "✅ Background radiation—no risk."
+    elif uSv_h < 5.0:
+        return "⚠️ Elevated radiation—limit exposure to 30 min."
+    else:
+        return "🚨 Dangerous radiation levels—evacuate immediately!"
+
+# **Run Startup Timer**
+sensor_startup_timer(22)
+
+# **Initialize Air Quality Variables**
+eCO2, TVOC = 0, 0  
+air_warnings = get_warning(eCO2, TVOC)  
+voc_last_update = time.monotonic()  
+display_last_update = time.monotonic()  # **Track last display refresh**
+
+# **Main Sensor Loop**
+start_time = time.monotonic()
+pulse_count = 0  
+
+while True:
+    current_time = time.monotonic()
+
+    # **Geiger Counter - Continuous Fast Polling**
+    if current_time - start_time < count_duration:
+        led.value = (current_time % 1) < 0.5  # Blink LED
+        if not geiger_sensor.value and current_time - last_pulse_time > 0.005:  # Optimized polling
+            pulse_count += 1
+            last_pulse_time = current_time
+            piezo.value = True
+            time.sleep(0.0001)  # Very short beep, doesn't block
+            piezo.value = False
+            print(f"Pulse detected! Total: {pulse_count}")  # Debugging output
+    else:
+        cpm = pulse_count
+        uSv_h = cpm / alpha
+        pulse_count = 0
+        start_time = time.monotonic()
+
+    # **CO₂ & VOC Sensor - Update Every 3 Seconds**
+    if current_time - voc_last_update >= 3:
+        eCO2, TVOC = sgp30.iaq_measure()
+        air_warnings = get_warning(eCO2, TVOC)
+        voc_last_update = current_time  
+
+    rad_warning = get_radiation_warning(uSv_h)
+
+    # **Screen Refresh Every 3 Seconds**
+    if current_time - display_last_update >= 3:
+        print("\r" + " " * 120, end="")  
+        print(f"\rCO₂: {eCO2} ppm | TVOC: {TVOC} ppb | CPM: {cpm} | uSv/h: {uSv_h} | {air_warnings[0]} | {air_warnings[1]} | {rad_warning}", end="")
+        display_last_update = current_time  # **Reset display refresh timer**
+
