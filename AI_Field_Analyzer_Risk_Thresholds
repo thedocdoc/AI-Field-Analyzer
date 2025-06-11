@@ -1,0 +1,19 @@
+Sensor	Low Risk	Medium Risk	High Risk	Recommended Action/Timing
+CO₂ Sensor	< 1,000 ppm: Normal indoor levels	1,000–2,000 ppm: Drowsiness possible	> 2,000 ppm: Cognitive impairment risk	"Med: Ventilate within 10–15 min
+High: Leave in 5 min"
+VOC Sensor	< 0.5 ppm: Background levels	0.5–2.0 ppm: Chemical odors, slight discomfort	> 2.0 ppm: Headaches, nausea	"Med: Address within 15 min
+High: Leave in 5 min"
+Barometric Pressure	> 1,000 hPa: Standard, calm conditions	980–1,000 hPa: Possible weather shifts	< 980 hPa: Severe atmospheric disturbance	"Med: Monitor in 20–30 min
+High: Shelter in 10 min"
+Temperature Sensor	15–30 °C (59–86 °F): Comfortable ambient range	30–35 °C or 5–15 °C: Mild discomfort	> 35 °C or < 5 °C: Heat/cold stress	"Med: Adjust in 15–20 min
+High: Act in 5 min"
+Humidity Sensor	30–60% RH: Optimal for comfort	20–30% or 60–70% RH: Respiratory irritation	< 20% or > 70% RH: Health effects risk	"Med: Correct in 15–20 min
+High: Act in 5 min"
+Geiger Counter	< 0.5 μSv/h: Background radiation	0.5–5.0 μSv/h: Elevated, prolonged exposure	> 5.0 μSv/h: Dangerous exposure	"Med: Limit to 30 min
+High: Evacuate in 5 min"
+Ambient Light Sensor	100–500 lux: Typical indoor illumination	500–2,000 lux: Brighter than normal	> 2,000 lux: Visual discomfort	"Med: Eye protection in 15 min
+High: Avoid immediately"
+Sound (Microphone)	< 70 dB: Safe for normal conversation	70–85 dB: Discomfort over time	> 85 dB: Hearing damage potential	"Med: Limit to 30 min
+High: Use protection < 5 min"
+Magnetic Field Sensor	< 100 µT: Within Earth-field limits	100–300 µT: Elevated, caution for devices	> 300 µT: Risk of interference or health effects	"Med: Limit to 20 min
+High: Shield or leave in 5 min"
