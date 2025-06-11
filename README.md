@@ -8,3 +8,5 @@ No more guessing with sensor numbers. (this alone is the issue that I see that s
 It will feature a big battery, open hardware, and practical field use.
 
 It gives real feedback in plain English, not just sensor numbers and will actually warn you when it’s time to leave. It will be feature a high capacity battery and open hardware for real-world fieldwork. No hype just practical science and anomaly logging you can use Build details and files on the project page. I was tied of the future coming to me, I'm pretty sure I can make it instead...
+
+Currently the following code is just a start to both read the first two sensors and create the first low power warning mode. Normally low power mode will only warn medium status, if a rise is detected the AI Google coral mini board will be putt online and the Pico will communicate sensor data to it. The Coral will then use on the edge AI to give the best feedback possible on a dangerous situation or a detected anomaly.
