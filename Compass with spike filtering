@@ -1,0 +1,255 @@
+"""
+AI Field Analyzer v1.1 - Rugged & Portable AI-Enabled Field Instrument
+-----------------------------------------------------------------
+A robust and intelligent sensor platform designed for real-world environmental analysis.
+Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
+Engineered for durability, precision, and usability in demanding field conditions.
+
+Project Link: https://hackaday.io/project/203273-ai-field-analyzer
+
+MIT License (See LICENSE file for details)
+
+© 2025 Apollo Timbers. All rights reserved.
+
+Features:
+
+Compass with spike filtering
+Sensor fusion and tilt compensation
+
+-tlv493d
+-lis3dh
+"""
+
+import math
+import time
+import board
+import busio
+import adafruit_tlv493d
+import adafruit_lis3dh
+
+class SimpleCompass:
+    def __init__(self, i2c):
+        print("Initializing compass sensors...")
+        self.mag = adafruit_tlv493d.TLV493D(i2c)
+        self.accel = adafruit_lis3dh.LIS3DH_I2C(i2c)
+        self.accel.range = adafruit_lis3dh.RANGE_2_G
+        
+        # Calibration offsets (will be set during calibration)
+        self.offsets = [0.0, 0.0, 0.0]
+        
+        # Better smoothing - keep more readings and filter outliers
+        self.readings = []
+        self.max_readings = 10
+        
+    def calibrate(self, duration=15):
+        print("=== COMPASS CALIBRATION ===")
+        print("Rotate device slowly in all directions for {} seconds...".format(duration))
+        
+        start_time = time.monotonic()
+        max_x = max_y = max_z = -999999
+        min_x = min_y = min_z = 999999
+        
+        while time.monotonic() - start_time < duration:
+            try:
+                x, y, z = self.mag.magnetic
+                print("X:{:.1f} Y:{:.1f} Z:{:.1f}".format(x, y, z))
+                
+                if x > max_x: max_x = x
+                if x < min_x: min_x = x
+                if y > max_y: max_y = y
+                if y < min_y: min_y = y
+                if z > max_z: max_z = z
+                if z < min_z: min_z = z
+                
+                time.sleep(0.2)
+            except:
+                print("Sensor read error")
+                time.sleep(0.1)
+        
+        # Calculate offsets (hard iron correction)
+        self.offsets[0] = (max_x + min_x) / 2.0
+        self.offsets[1] = (max_y + min_y) / 2.0
+        self.offsets[2] = (max_z + min_z) / 2.0
+        
+        print("Calibration complete!")
+        print("Offsets: X={:.2f}, Y={:.2f}, Z={:.2f}".format(
+            self.offsets[0], self.offsets[1], self.offsets[2]))
+    
+    def get_heading(self):
+        try:
+            # Get magnetometer reading
+            mx, my, mz = self.mag.magnetic
+            mx -= self.offsets[0]
+            my -= self.offsets[1] 
+            mz -= self.offsets[2]
+            
+            # Get accelerometer for tilt compensation
+            ax, ay, az = self.accel.acceleration
+            
+            # Normalize accelerometer
+            norm = math.sqrt(ax*ax + ay*ay + az*az)
+            if norm < 0.1:  # Avoid division by zero
+                return None
+                
+            ax /= norm
+            ay /= norm
+            az /= norm
+            
+            # Calculate tilt angles
+            pitch = math.asin(-ax) if -1 <= ax <= 1 else 0
+            roll = math.asin(ay / math.cos(pitch)) if abs(math.cos(pitch)) > 0.1 else 0
+            
+            # Tilt compensated compass
+            mx_comp = mx * math.cos(pitch) + mz * math.sin(pitch)
+            my_comp = (mx * math.sin(roll) * math.sin(pitch) + 
+                      my * math.cos(roll) - 
+                      mz * math.sin(roll) * math.cos(pitch))
+            
+            # Calculate heading
+            heading = math.atan2(-my_comp, mx_comp)
+            heading_degrees = math.degrees(heading)
+            
+            # Normalize to 0-360
+            if heading_degrees < 0:
+                heading_degrees += 360
+                
+            return heading_degrees
+            
+        except Exception as e:
+            print("Heading calculation error:", e)
+            return None
+    
+    def get_smoothed_heading(self):
+        heading = self.get_heading()
+        if heading is None:
+            return None
+            
+        # Filter out readings that are too different from recent average
+        if len(self.readings) >= 3:
+            # Calculate recent average
+            recent_sum_x = recent_sum_y = 0
+            for h in self.readings[-3:]:
+                rad = math.radians(h)
+                recent_sum_x += math.cos(rad)
+                recent_sum_y += math.sin(rad)
+            
+            recent_avg_x = recent_sum_x / 3
+            recent_avg_y = recent_sum_y / 3
+            recent_avg = math.degrees(math.atan2(recent_avg_y, recent_avg_x))
+            if recent_avg < 0:
+                recent_avg += 360
+            
+            # Check if new reading is too far from recent average
+            diff = abs(heading - recent_avg)
+            if diff > 180:
+                diff = 360 - diff
+            
+            # If reading differs by more than 90 degrees, it's probably noise
+            if diff > 90:
+                print("Filtering outlier: {:.1f}° (recent avg: {:.1f}°)".format(heading, recent_avg))
+                return self.get_last_valid_heading()
+        
+        # Add to readings list
+        self.readings.append(heading)
+        if len(self.readings) > self.max_readings:
+            self.readings.pop(0)
+        
+        # Simple circular average for compass headings
+        if len(self.readings) == 0:
+            return None
+            
+        # Convert to unit vectors and average
+        sum_x = sum_y = 0
+        for h in self.readings:
+            rad = math.radians(h)
+            sum_x += math.cos(rad)
+            sum_y += math.sin(rad)
+        
+        avg_x = sum_x / len(self.readings)
+        avg_y = sum_y / len(self.readings)
+        
+        # Convert back to degrees
+        avg_heading = math.degrees(math.atan2(avg_y, avg_x))
+        if avg_heading < 0:
+            avg_heading += 360
+            
+        return avg_heading
+    
+    def get_last_valid_heading(self):
+        # Return the most recent smoothed heading
+        if len(self.readings) == 0:
+            return None
+            
+        # Use last few readings for average
+        recent_readings = self.readings[-min(3, len(self.readings)):]
+        sum_x = sum_y = 0
+        for h in recent_readings:
+            rad = math.radians(h)
+            sum_x += math.cos(rad)
+            sum_y += math.sin(rad)
+        
+        avg_x = sum_x / len(recent_readings)
+        avg_y = sum_y / len(recent_readings)
+        
+        avg_heading = math.degrees(math.atan2(avg_y, avg_x))
+        if avg_heading < 0:
+            avg_heading += 360
+            
+        return avg_heading
+    
+    def heading_to_direction(self, heading):
+        if heading is None:
+            return "Unknown"
+            
+        directions = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+        
+        # Each direction covers 22.5 degrees
+        index = int((heading + 11.25) / 22.5) % 16
+        return directions[index]
+
+# === MAIN PROGRAM ===
+print("Starting Digital Compass System")
+
+# Initialize I2C
+try:
+    i2c = busio.I2C(board.GP5, board.GP4)
+    print("I2C initialized")
+except Exception as e:
+    print("I2C error:", e)
+    while True:
+        time.sleep(1)
+
+# Create compass
+try:
+    compass = SimpleCompass(i2c)
+    print("Compass created successfully")
+except Exception as e:
+    print("Compass creation error:", e)
+    while True:
+        time.sleep(1)
+
+# Calibrate
+compass.calibrate(15)  # 15 second calibration
+
+print("\n=== COMPASS READINGS ===")
+print("Press Ctrl+C to stop")
+
+# Main loop
+try:
+    while True:
+        raw_heading = compass.get_heading()
+        smooth_heading = compass.get_smoothed_heading()
+        
+        if smooth_heading is not None:
+            direction = compass.heading_to_direction(smooth_heading)
+            print("Heading: {:.1f}° ({})".format(smooth_heading, direction))
+        else:
+            print("No valid reading")
+            
+        time.sleep(1.0)  # Update once per second for more stability
+        
+except KeyboardInterrupt:
+    print("\nCompass stopped")
+except Exception as e:
+    print("Error:", e)
