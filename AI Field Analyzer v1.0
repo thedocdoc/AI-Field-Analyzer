@@ -89,9 +89,9 @@ while True:
             pulse_count += 1
             last_pulse_time = current_time
             piezo.value = True
-            time.sleep(0.0001)  # Very short beep, doesn't block
+            time.sleep(0.0001)  # Very short beep, doesn't block .0001
             piezo.value = False
-            print(f"Pulse detected! Total: {pulse_count}")  # Debugging output
+            #print(f"Pulse detected! Total: {pulse_count}")  # Debugging output
     else:
         cpm = pulse_count
         uSv_h = cpm / alpha
@@ -108,7 +108,8 @@ while True:
 
     # **Screen Refresh Every 3 Seconds**
     if current_time - display_last_update >= 3:
+        timestamp = time.localtime()  # Get time structure
+        formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"  # Format manually
         print("\r" + " " * 120, end="")  
-        print(f"\rCO₂: {eCO2} ppm | TVOC: {TVOC} ppb | CPM: {cpm} | uSv/h: {uSv_h} | {air_warnings[0]} | {air_warnings[1]} | {rad_warning}", end="")
+        print(f"\r[{formatted_time}] CO₂: {eCO2} ppm | TVOC: {TVOC} ppb | CPM: {cpm} | uSv/h: {uSv_h} | {air_warnings[0]} | {air_warnings[1]} | {rad_warning}", end="")
         display_last_update = current_time  # **Reset display refresh timer**
-
