@@ -1,0 +1,437 @@
+"""
+AI Field Analyzer v1.1 - Rugged & Portable AI-Enabled Field Instrument
+-----------------------------------------------------------------
+A robust and intelligent sensor platform designed for real-world environmental analysis.
+Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
+Engineered for durability, precision, and usability in demanding field conditions.
+
+Project Link: https://hackaday.io/project/203273-ai-field-analyzer
+
+MIT License (See LICENSE file for details)
+
+© 2025 Apollo Timbers. All rights reserved.
+
+Features:
+
+-Basic threashold warnings in plain english
+-Multiple anomaly “nets” for detecting the unexpected—both practical (safety) and speculative (high strangeness, EM/gravity oddities, time distortion, etc.)
+
+Sensors:
+-BNO085
+
+***Untested***
+"""
+
+import time
+import board
+import busio
+import adafruit_bno08x
+import math
+
+# I2C setup
+i2c = busio.I2C(board.GP5, board.GP4)
+bno = adafruit_bno08x.BNO08X_I2C(i2c)
+
+# Enable the features we need
+bno.enable_feature(adafruit_bno08x.BNO_REPORT_ACCELEROMETER)
+bno.enable_feature(adafruit_bno08x.BNO_REPORT_GYROSCOPE)
+bno.enable_feature(adafruit_bno08x.BNO_REPORT_MAGNETOMETER)
+bno.enable_feature(adafruit_bno08x.BNO_REPORT_ROTATION_VECTOR)
+bno.enable_feature(adafruit_bno08x.BNO_REPORT_LINEAR_ACCELERATION)
+bno.enable_feature(adafruit_bno08x.BNO_REPORT_GRAVITY)
+
+# Constants
+GRAVITY_EARTH = 9.806
+GRAV_TOLERANCE = 0.15
+ACCEL_THRESHOLD = 0.5
+GYRO_THRESHOLD = 5.0
+HEADING_JUMP = 45
+DRIFT_WINDOW = 10  # seconds
+MAX_GYRO_RATE = 10  # rad/s
+
+# Advanced anomaly detection constants
+TIME_DISTORTION_WINDOW = 5  # seconds
+MAGNETIC_VARIANCE_THRESHOLD = 0.3  # for compass interference
+GRAVITY_WAVE_THRESHOLD = 0.05  # micro variations
+FIELD_RESONANCE_BANDS = [7.83, 14.3, 20.8]  # Schumann resonance harmonics
+
+# State variables
+prev_heading = None
+prev_gravity = None
+last_gravity_flip_time = 0
+heading_history = []
+consecutive_errors = 0
+
+# Advanced anomaly tracking
+time_samples = []
+gravity_micro_history = []
+heading_variance_history = []
+sensor_timestamps = []
+baseline_loop_time = 0.5
+
+def heading_to_direction(heading):
+    """Convert heading in degrees to cardinal direction"""
+    directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return directions[int((heading + 22.5) % 360 / 45)]
+
+def is_valid_reading(yaw, pitch, roll, lin_accel, gravity):
+    """Check if sensor readings are valid (not None or NaN)"""
+    values = [yaw, pitch, roll] + list(lin_accel) + list(gravity)
+    return all(x is not None and not math.isnan(x) for x in values)
+
+def check_sensor_calibration(bno):
+    """Check sensor calibration status if available"""
+    try:
+        if hasattr(bno, 'calibration_status'):
+            cal_sys, cal_gyro, cal_accel, cal_mag = bno.calibration_status
+            if any(cal < 2 for cal in [cal_sys, cal_gyro, cal_accel]):
+                return f"Poor calibration: sys={cal_sys}, gyro={cal_gyro}, accel={cal_accel}, mag={cal_mag}"
+    except:
+        pass
+    return None
+
+def check_heading_drift(current_time, yaw, accel_mag, pitch, roll, heading_history):
+    """Check for heading drift while stationary"""
+    if accel_mag < 0.05 and abs(pitch) < 5 and abs(roll) < 5:
+        heading_history.append((current_time, yaw))
+        
+        # Keep only recent history
+        heading_history[:] = [(t, h) for t, h in heading_history if current_time - t <= DRIFT_WINDOW]
+        
+        if len(heading_history) > 20:  # Need sufficient data points
+            headings = [h for _, h in heading_history]
+            heading_range = max(headings) - min(headings)
+            
+            # Handle 360° wraparound
+            if heading_range > 180:
+                # Adjust for wraparound
+                adjusted_headings = [(h + 180) % 360 - 180 for h in headings]
+                heading_range = max(adjusted_headings) - min(adjusted_headings)
+            
+            if heading_range > 15:  # >15° drift while stationary
+                return f"Heading drift while stationary: {heading_range:.1f}°"
+    
+    return None
+
+def detect_temporal_anomaly(current_time, sensor_timestamps, baseline_time):
+    """Detect temporal anomalies by monitoring loop timing consistency"""
+    sensor_timestamps.append(current_time)
+    
+    # Keep last 20 samples
+    if len(sensor_timestamps) > 20:
+        sensor_timestamps.pop(0)
+    
+    if len(sensor_timestamps) >= 10:
+        # Calculate actual intervals
+        intervals = [sensor_timestamps[i] - sensor_timestamps[i-1] for i in range(1, len(sensor_timestamps))]
+        avg_interval = sum(intervals) / len(intervals)
+        
+        # Check for temporal variance
+        time_variance = sum((interval - baseline_time)**2 for interval in intervals) / len(intervals)
+        
+        if time_variance > 0.1:  # High temporal variance
+            return f"TEMPORAL: High variance in sensor timing: {time_variance:.3f}s"
+        
+        if avg_interval > baseline_time * 2:
+            return f"TEMPORAL: Timing delay detected: {avg_interval:.3f}s intervals"
+        
+        if avg_interval < baseline_time * 0.5:
+            return f"TEMPORAL: Timing acceleration detected: {avg_interval:.3f}s intervals"
+    
+    return None
+
+def detect_magnetic_interference(heading_variance_history, yaw, current_time):
+    """Detect chaotic compass behavior - possible EM interference"""
+    heading_variance_history.append((current_time, yaw))
+    
+    # Keep 30 seconds of data
+    heading_variance_history[:] = [(t, h) for t, h in heading_variance_history if current_time - t <= 30]
+    
+    if len(heading_variance_history) > 60:  # Need sufficient samples
+        headings = [h for _, h in heading_variance_history]
+        
+        # Calculate variance in recent headings
+        mean_heading = sum(headings) / len(headings)
+        variance = sum((h - mean_heading)**2 for h in headings) / len(headings)
+        
+        # Check for chaotic interference
+        if variance > 3000:  # Very high variance in compass
+            return f"MAGNETIC: Strong interference detected, variance {variance:.0f}°²"
+        
+        # Check for artificial patterns
+        recent_headings = headings[-20:]
+        if len(set(int(h/10)*10 for h in recent_headings)) >= 18:  # Covering most directions
+            return "MAGNETIC: Artificial rotation pattern detected"
+    
+    return None
+
+def detect_gravity_anomalies(gravity_micro_history, grav_mag, current_time):
+    """Detect micro-variations in gravity that could indicate field effects"""
+    gravity_micro_history.append((current_time, grav_mag))
+    
+    # Keep 60 seconds of high-resolution gravity data
+    gravity_micro_history[:] = [(t, g) for t, g in gravity_micro_history if current_time - t <= 60]
+    
+    if len(gravity_micro_history) > 100:
+        gravities = [g for _, g in gravity_micro_history]
+        
+        # Look for periodic micro-oscillations
+        mean_grav = sum(gravities) / len(gravities)
+        micro_variations = [abs(g - mean_grav) for g in gravities]
+        
+        if max(micro_variations) > GRAVITY_WAVE_THRESHOLD and max(micro_variations) < 0.2:
+            # Subtle but detectable gravity variations
+            return f"GRAVITATIONAL: Micro-variations detected: ±{max(micro_variations):.3f} m/s²"
+        
+        # Check for rhythmic patterns
+        if len(set(round(v, 3) for v in micro_variations[-20:])) < 5:
+            return "GRAVITATIONAL: Rhythmic field pattern detected"
+    
+    return None
+
+def detect_sensor_coherence_failure(yaw, pitch, roll, lin_accel, gravity, gyro):
+    """Detect when multiple sensors disagree in physically impossible ways"""
+    anomalies = []
+    
+    # Check if gravity and linear acceleration vectors are coherent
+    if lin_accel and gravity:
+        dot_product = sum(lin_accel[i] * gravity[i] for i in range(3))
+        if abs(dot_product) > 5:  # Should be near zero for pure linear acceleration
+            anomalies.append("COHERENCE: Gravity/acceleration vector mismatch")
+    
+    # Check for impossible gyro/euler combinations
+    if gyro and prev_heading is not None:
+        expected_yaw_rate = gyro[2] * (180 / math.pi)  # Convert to degrees/sec
+        actual_yaw_change = (yaw - prev_heading) / 0.5  # degrees per 0.5 sec
+        
+        if abs(expected_yaw_rate - actual_yaw_change) > 45:
+            anomalies.append(f"COHERENCE: Gyro/Euler mismatch - gyro: {expected_yaw_rate:.1f}°/s, euler: {actual_yaw_change:.1f}°/s")
+    
+    return anomalies
+
+def detect_geometric_impossibility(pitch, roll, yaw, gravity):
+    """Detect geometrically impossible sensor combinations"""
+    # Check if reported attitude matches gravity vector
+    if gravity:
+        # Calculate expected gravity direction from attitude
+        expected_grav_z = math.cos(math.radians(pitch)) * math.cos(math.radians(roll))
+        actual_grav_z = gravity[2] / ((gravity[0]**2 + gravity[1]**2 + gravity[2]**2)**0.5)
+        
+        if abs(expected_grav_z - actual_grav_z) > 0.5:
+            return f"GEOMETRIC: Attitude/gravity vector inconsistency"
+    
+    return None
+
+def detect_field_resonance(gyro_rate):
+    """Detect if rotation rates match known field resonance frequencies"""
+    # Check for Schumann resonance or other significant frequencies
+    for freq in FIELD_RESONANCE_BANDS:
+        if abs(gyro_rate - freq) < 0.5:
+            return f"RESONANCE: Field resonance detected at {gyro_rate:.2f} Hz"
+    return None
+
+print("AI FIELD ANALYZER - IMU Anomaly Detection System")
+print("Initializing sensors and calibrating baselines...")
+time.sleep(2)
+
+while True:
+    try:
+        # Read sensor data
+        yaw, pitch, roll = bno.euler
+        lin_accel = bno.linear_acceleration
+        gravity = bno.gravity
+        gyro = bno.gyro if hasattr(bno, 'gyro') else (0, 0, 0)
+        
+        current_time = time.monotonic()
+        anomalies = []
+        critical_anomalies = []
+        
+        # Validate readings
+        if not is_valid_reading(yaw, pitch, roll, lin_accel, gravity):
+            anomalies.append("SENSOR: Invalid readings detected (NaN/None values)")
+            consecutive_errors += 1
+            if consecutive_errors > 10:
+                critical_anomalies.append("CRITICAL: Multiple consecutive sensor failures")
+        else:
+            consecutive_errors = 0
+            
+            # Calculate magnitudes
+            grav_mag = (gravity[0]**2 + gravity[1]**2 + gravity[2]**2)**0.5
+            accel_mag = (lin_accel[0]**2 + lin_accel[1]**2 + lin_accel[2]**2)**0.5
+            gyro_rate = (gyro[0]**2 + gyro[1]**2 + gyro[2]**2)**0.5
+            
+            # === STANDARD ANOMALY DETECTION ===
+            
+            # 1. Gravity magnitude check
+            if abs(grav_mag - GRAVITY_EARTH) > GRAV_TOLERANCE:
+                if abs(grav_mag - GRAVITY_EARTH) > 1.0:
+                    critical_anomalies.append(f"GRAVITY: Significant deviation {grav_mag:.2f} m/s² (expected ~{GRAVITY_EARTH})")
+                else:
+                    anomalies.append(f"GRAVITY: Minor deviation {grav_mag:.2f} m/s²")
+            
+            # 2. Movement detection
+            if accel_mag > ACCEL_THRESHOLD:
+                if accel_mag > 10:
+                    critical_anomalies.append(f"MOTION: High acceleration detected {accel_mag:.2f} m/s²")
+                else:
+                    anomalies.append(f"MOTION: Movement detected {accel_mag:.2f} m/s²")
+            
+            # 3. Heading jump detection
+            if prev_heading is not None:
+                delta_heading = abs(yaw - prev_heading)
+                if delta_heading > 180:
+                    delta_heading = 360 - delta_heading
+                if delta_heading > HEADING_JUMP:
+                    anomalies.append(f"COMPASS: Heading jump {delta_heading:.1f}°")
+            
+            # 4. Extreme orientation detection
+            if abs(pitch) > 60 or abs(roll) > 60:
+                if abs(pitch) > 80 or abs(roll) > 80:
+                    critical_anomalies.append(f"ORIENTATION: Extreme tilt - pitch {pitch:.1f}°, roll {roll:.1f}°")
+                else:
+                    anomalies.append(f"ORIENTATION: High tilt - pitch {pitch:.1f}°, roll {roll:.1f}°")
+            
+            # 5. Gyroscope rate check
+            if gyro_rate > MAX_GYRO_RATE:
+                critical_anomalies.append(f"ROTATION: Extreme rate {gyro_rate:.2f} rad/s")
+            elif gyro_rate > GYRO_THRESHOLD:
+                anomalies.append(f"ROTATION: High rate {gyro_rate:.2f} rad/s")
+            
+            # === ADVANCED ANOMALY DETECTION ===
+            
+            # 6. Gravity vector flip
+            if prev_gravity:
+                prev_grav_mag = (prev_gravity[0]**2 + prev_gravity[1]**2 + prev_gravity[2]**2)**0.5
+                if prev_grav_mag > 0 and grav_mag > 0:
+                    dot = sum([gravity[i] * prev_gravity[i] for i in range(3)]) / (grav_mag * prev_grav_mag)
+                    if dot < -0.5:  # More than ~120° flip
+                        if current_time - last_gravity_flip_time > 1.0:
+                            critical_anomalies.append("GRAVITY: Vector orientation flip detected")
+                            last_gravity_flip_time = current_time
+            
+            # 7. Zero gravity event
+            if grav_mag < 0.5:
+                critical_anomalies.append(f"GRAVITY: Near-zero gravity detected ({grav_mag:.2f} m/s²)")
+            
+            # 8. Extreme conditions combination
+            if (abs(pitch) > 80 or abs(roll) > 80) and grav_mag < 5.0:
+                critical_anomalies.append("COMBINED: Extreme orientation with gravity loss")
+            
+            # 9. Non-physical acceleration
+            if accel_mag > 50:
+                critical_anomalies.append(f"PHYSICS: Non-physical acceleration detected ({accel_mag:.2f} m/s²)")
+            
+            # 10. Gravity field anomaly
+            if grav_mag > 15 or grav_mag < 5:
+                critical_anomalies.append(f"FIELD: Gravity field anomaly - {grav_mag:.2f} m/s²")
+            
+            # 11. Heading drift analysis
+            drift_anomaly = check_heading_drift(current_time, yaw, accel_mag, pitch, roll, heading_history)
+            if drift_anomaly:
+                anomalies.append(f"DRIFT: {drift_anomaly}")
+            
+            # 12. Sensor calibration check
+            cal_issue = check_sensor_calibration(bno)
+            if cal_issue:
+                anomalies.append(f"CALIBRATION: {cal_issue}")
+            
+            # === EXOTIC/ADVANCED DETECTION ===
+            
+            # 13. Temporal anomaly detection
+            time_anomaly = detect_temporal_anomaly(current_time, sensor_timestamps, baseline_loop_time)
+            if time_anomaly:
+                critical_anomalies.append(time_anomaly)
+            
+            # 14. Magnetic interference detection
+            magnetic_anomaly = detect_magnetic_interference(heading_variance_history, yaw, current_time)
+            if magnetic_anomaly:
+                anomalies.append(magnetic_anomaly)
+            
+            # 15. Gravitational field analysis
+            gravity_anomaly = detect_gravity_anomalies(gravity_micro_history, grav_mag, current_time)
+            if gravity_anomaly:
+                anomalies.append(gravity_anomaly)
+            
+            # 16. Sensor coherence analysis
+            coherence_anomalies = detect_sensor_coherence_failure(yaw, pitch, roll, lin_accel, gravity, gyro)
+            for anomaly in coherence_anomalies:
+                critical_anomalies.append(anomaly)
+            
+            # 17. Geometric consistency check
+            geometry_anomaly = detect_geometric_impossibility(pitch, roll, yaw, gravity)
+            if geometry_anomaly:
+                critical_anomalies.append(geometry_anomaly)
+            
+            # 18. Field resonance detection
+            resonance_anomaly = detect_field_resonance(gyro_rate)
+            if resonance_anomaly:
+                anomalies.append(resonance_anomaly)
+            
+            # 19. Perfect stillness detection (possible sensor malfunction)
+            if (accel_mag < 0.001 and gyro_rate < 0.001 and 
+                abs(grav_mag - GRAVITY_EARTH) < 0.001 and
+                abs(pitch) < 0.1 and abs(roll) < 0.1):
+                anomalies.append("ANOMALY: Perfect stillness detected - verify sensor functionality")
+            
+            # 20. Reality check - infinite values
+            sensor_values = [yaw, pitch, roll, grav_mag, accel_mag, gyro_rate]
+            if any(math.isinf(val) for val in sensor_values):
+                critical_anomalies.append("CRITICAL: Infinite sensor values detected - possible hardware failure")
+            
+            # Update state
+            prev_heading = yaw
+            prev_gravity = gravity
+        
+        # === OUTPUT LOGIC ===
+        if critical_anomalies or anomalies:
+            print("\n" + "="*70)
+            
+            if critical_anomalies:
+                print("*** CRITICAL ANOMALY DETECTED - IMMEDIATE ANALYSIS REQUIRED ***")
+                print("TRIGGERING PRIORITY CORAL AI PROCESSING")
+                print("-" * 50)
+                for i, anomaly in enumerate(critical_anomalies, 1):
+                    print(f"  {i}. {anomaly}")
+            
+            if anomalies:
+                if critical_anomalies:
+                    print("\nAdditional Anomalies:")
+                else:
+                    print("ANOMALY DETECTED - Standard Analysis")
+                    print("Triggering Coral AI processing...")
+                    print("-" * 40)
+                
+                for i, anomaly in enumerate(anomalies, 1):
+                    print(f"  {i}. {anomaly}")
+            
+            print(f"\nSensor Status [T:{current_time:.1f}s]:")
+            print(f"  Heading: {yaw:.1f}° ({heading_to_direction(yaw)})")
+            print(f"  Attitude: P{pitch:.1f}° R{roll:.1f}°")
+            print(f"  Gravity: {grav_mag:.3f} m/s²")
+            print(f"  Linear Accel: {accel_mag:.3f} m/s²")
+            print(f"  Gyro Rate: {gyro_rate:.3f} rad/s")
+            print("="*70)
+            
+            # Coral AI trigger points
+            if critical_anomalies:
+                # coral_ai.priority_analysis(critical_anomalies, current_sensor_data)
+                pass
+            else:
+                # coral_ai.standard_analysis(anomalies, current_sensor_data)
+                pass
+            
+        else:
+            # Normal operation - periodic status
+            if int(current_time) % 15 == 0 and int(current_time * 10) % 10 == 0:
+                direction = heading_to_direction(yaw)
+                print(f"[{current_time:.1f}s] HDG:{yaw:.1f}°({direction}) "
+                      f"P:{pitch:.1f}° R:{roll:.1f}° "
+                      f"G:{grav_mag:.2f} LA:{accel_mag:.2f} - Status: NORMAL")
+    
+    except Exception as e:
+        print(f"SENSOR ERROR: {e}")
+        consecutive_errors += 1
+        if consecutive_errors > 20:
+            print("CRITICAL: Extended sensor failure - possible hardware malfunction")
+    
+    time.sleep(0.5)
