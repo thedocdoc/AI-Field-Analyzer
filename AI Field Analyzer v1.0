@@ -1,5 +1,5 @@
 """
-AI Field Analyzer v1.0 - Rugged & Portable AI-Enabled Field Instrument
+AI Field Analyzer v1.1 - Rugged & Portable AI-Enabled Field Instrument
 -----------------------------------------------------------------
 A robust and intelligent sensor platform designed for real-world environmental analysis.
 Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
@@ -10,17 +10,31 @@ Project Link: https://hackaday.io/project/203273-ai-field-analyzer
 MIT License (See LICENSE file for details)
 
 © 2025 Apollo Timbers. All rights reserved.
+
+Features:
+
+-basic threashold warnings in plain english
+-Timestamped readings
+-Timestamped file names for logging
+-Logging via csv to a SD card (does not log if no SD card is found)
+
+Sensors:
+-Pocket Geiger
+-SGP30
 """
 
 import time
 import board
 import busio
 import digitalio
+import storage
+import sdcardio
 import adafruit_sgp30
+
 
 # **Geiger Counter Setup**
 geiger_pin = board.GP7
-led_pin = board.GP13
+led_pin = board.GP2
 piezo_pin = board.GP1
 pulse_count = 0
 count_duration = 120  # 2 minutes in seconds
@@ -67,7 +81,7 @@ def get_radiation_warning(uSv_h):
         return "🚨 Dangerous radiation levels—evacuate immediately!"
 
 # **Run Startup Timer**
-sensor_startup_timer(22)
+sensor_startup_timer(2)
 
 # **Initialize Air Quality Variables**
 eCO2, TVOC = 0, 0  
@@ -77,7 +91,37 @@ display_last_update = time.monotonic()  # **Track last display refresh**
 
 # **Main Sensor Loop**
 start_time = time.monotonic()
-pulse_count = 0  
+pulse_count = 0
+
+# **SD Card Setup with Error Handling**
+try:
+    spi = busio.SPI(board.GP18, board.GP19, board.GP16)  
+    cs = board.GP17
+    sdcard = sdcardio.SDCard(spi, cs)
+    vfs = storage.VfsFat(sdcard)
+    storage.mount(vfs, "/sd")
+    sd_available = True
+    print("✅ SD Card detected. Data logging enabled.")
+
+    # **Generate Timestamped Filename**
+    timestamp = time.localtime()
+    formatted_date = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}_{timestamp.tm_hour:02}-{timestamp.tm_min:02}-{timestamp.tm_sec:02}"
+    LOG_FILE = f"/sd/field_data_{formatted_date}.csv"  # Unique file per run
+
+    # **Create File & Write Header**
+    with open(LOG_FILE, "a") as f:
+        f.write("Timestamp,CO2_ppm,TVOC_ppb,CPM,uSv/h,Air_Warning,Radiation_Warning\n")
+
+except OSError:
+    sd_available = False
+    print("🚨 SD Card not found! Logging disabled.")
+    time.sleep(5)  # Pause to show error, then continue running
+
+
+except OSError:
+    sd_available = False
+    print("🚨 SD Card not found! Logging disabled.")
+    time.sleep(5)  # Pause to show the error, then continue running
 
 while True:
     current_time = time.monotonic()
@@ -106,10 +150,16 @@ while True:
 
     rad_warning = get_radiation_warning(uSv_h)
 
-    # **Screen Refresh Every 3 Seconds**
+    # **Screen Refresh & Data Logging**
     if current_time - display_last_update >= 3:
-        timestamp = time.localtime()  # Get time structure
-        formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"  # Format manually
+        timestamp = time.localtime()
+        formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
         print("\r" + " " * 120, end="")  
         print(f"\r[{formatted_time}] CO₂: {eCO2} ppm | TVOC: {TVOC} ppb | CPM: {cpm} | uSv/h: {uSv_h} | {air_warnings[0]} | {air_warnings[1]} | {rad_warning}", end="")
+
+        # **Log Data Only If SD Card is Available**
+        if sd_available:
+            with open(LOG_FILE, "a") as f:
+                f.write(f"{formatted_time},{eCO2},{TVOC},{cpm},{uSv_h},{air_warnings[0]},{rad_warning}\n")
+
         display_last_update = current_time  # **Reset display refresh timer**
