@@ -1,0 +1,16 @@
+import board
+import busio
+import digitalio
+import storage
+import sdcardio
+
+spi = busio.SPI(board.GP18, board.GP19, board.GP16)  # Your confirmed SPI setup
+cs = board.GP17  # Chip Select
+
+try:
+    sdcard = sdcardio.SDCard(spi, cs)
+    vfs = storage.VfsFat(sdcard)
+    storage.mount(vfs, "/sd")
+    print("✅ SD card successfully mounted!")
+except OSError as e:
+    print(f"🚨 SD card error: {e}")
