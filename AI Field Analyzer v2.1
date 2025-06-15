@@ -57,7 +57,7 @@ import storage
 import sdcardio
 import adafruit_sgp30
 import adafruit_tsl2591
-import adafruit_displayio_ssd1325
+import adafruit_ssd1325
 import displayio
 import terminalio
 import pwmio
@@ -770,7 +770,7 @@ while True:
     # Check for button presses
     button_pressed = check_buttons()
     if button_pressed:
-        handle_button_input(button_pressed, eCO2, TVOC, cmp, uSv_h, lux, ir, visible)
+        handle_button_input(button_pressed, eCO2, TVOC, cpm, uSv_h, lux, ir, visible)
 
     # **Geiger Counter - Continuous Fast Polling**
     if current_time - start_time < count_duration:
@@ -842,3 +842,5 @@ while True:
         display_last_update = current_time
 
     time.sleep(0.05)  # Faster loop for responsive GUI
+
+
