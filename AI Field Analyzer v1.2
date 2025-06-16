@@ -1,0 +1,197 @@
+"""
+AI Field Analyzer v1.2 - Rugged & Portable AI-Enabled Field Instrument
+-----------------------------------------------------------------
+A robust and intelligent sensor platform designed for real-world environmental analysis.
+Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
+Engineered for durability, precision, and usability in demanding field conditions.
+
+Project Link: https://hackaday.io/project/203273-ai-field-analyzer
+
+MIT License (See LICENSE file for details)
+
+© 2025 Apollo Timbers. All rights reserved.
+
+Features:
+
+-basic threashold warnings in plain english
+-Timestamped readings
+-Timestamped file names for logging
+-Logging via csv to a SD card (does not log if no SD card is found)
+
+Sensors:
+-Pocket Geiger
+-SGP30
+-TSL2591 (Light/Lux)
+"""
+
+import time
+import board
+import busio
+import digitalio
+import storage
+import sdcardio
+import adafruit_sgp30
+import adafruit_tsl2591
+
+# **Geiger Counter Setup**
+geiger_pin = board.GP7
+led_pin = board.GP2
+piezo_pin = board.GP1
+pulse_count = 0
+count_duration = 120  # 2 minutes in seconds
+alpha = 53.032  # uSv to CPM conversion factor
+last_pulse_time = 0
+cpm = 0
+uSv_h = 0.0
+
+geiger_sensor = digitalio.DigitalInOut(geiger_pin)
+geiger_sensor.switch_to_input(pull=digitalio.Pull.UP)
+
+led = digitalio.DigitalInOut(led_pin)
+led.switch_to_output()
+
+piezo = digitalio.DigitalInOut(piezo_pin)
+piezo.switch_to_output()
+
+# **I2C Bus Setup (Shared by SGP30 and TSL2591)**
+i2c = busio.I2C(board.GP5, board.GP4)
+
+# **SGP30 Air Quality Sensor Setup**
+sgp30 = adafruit_sgp30.Adafruit_SGP30(i2c)
+sgp30.iaq_init()
+
+# **TSL2591 Light Sensor Setup**
+tsl = adafruit_tsl2591.TSL2591(i2c)
+# Configure for outdoor use - lower gain, shorter integration time
+tsl.gain = adafruit_tsl2591.GAIN_LOW  # 1x gain for bright conditions
+tsl.integration_time = adafruit_tsl2591.INTEGRATIONTIME_100MS
+
+# **Startup Countdown**
+def sensor_startup_timer(seconds):
+    for i in range(seconds, 0, -1):
+        print(f"\r⌛ Sensor Ready in {i}s...", end="")
+        time.sleep(1)
+    print("\r✅ Sensors Ready!")
+
+# **Air Quality Warnings**
+def get_warning(eCO2, TVOC):
+    warnings = []
+    warnings.append("✅ Excellent air quality.") if eCO2 < 1000 else warnings.append("⚠️ CO₂ rising—ventilate soon.") if eCO2 < 2000 else warnings.append("🚨 Dangerous CO₂ levels!")
+    warnings.append("✅ Air is clean.") if TVOC < 500 else warnings.append("⚠️ Chemical odors detected.") if TVOC < 2000 else warnings.append("🚨 High VOC levels!")
+    return warnings
+
+# **Light/UV Warnings**
+def get_light_warning(lux):
+    if lux < 200:
+        return "🌙 Low light—flashlight recommended."
+    elif lux < 1000:
+        return "🌤️ Moderate light—good for outdoor work."
+    elif lux < 10000:
+        return "☀️ Bright conditions—sunglasses recommended."
+    elif lux < 50000:
+        return "🌞 Very bright—apply sunscreen & wear hat."
+    elif lux < 100000:
+        return "🔥 Intense sunlight—seek shade frequently."
+    else:
+        return "🚨 Extreme UV—limit exposure to 15 minutes!"
+
+# **Radiation Warnings**
+def get_radiation_warning(uSv_h):
+    if uSv_h < 0.5:
+        return "✅ Background radiation—no risk."
+    elif uSv_h < 5.0:
+        return "⚠️ Elevated radiation—limit exposure to 30 min."
+    else:
+        return "🚨 Dangerous radiation levels—evacuate immediately!"
+
+# **Run Startup Timer**
+sensor_startup_timer(2)
+
+# **Initialize Sensor Variables**
+eCO2, TVOC = 0, 0  
+lux = 0
+air_warnings = get_warning(eCO2, TVOC)  
+light_warning = get_light_warning(lux)
+voc_last_update = time.monotonic()  
+light_last_update = time.monotonic()
+display_last_update = time.monotonic()
+
+# **Main Sensor Loop**
+start_time = time.monotonic()
+pulse_count = 0
+
+# **SD Card Setup with Error Handling**
+try:
+    spi = busio.SPI(board.GP18, board.GP19, board.GP16)  
+    cs = board.GP17
+    sdcard = sdcardio.SDCard(spi, cs)
+    vfs = storage.VfsFat(sdcard)
+    storage.mount(vfs, "/sd")
+    sd_available = True
+    print("✅ SD Card detected. Data logging enabled.")
+
+    # **Generate Timestamped Filename**
+    timestamp = time.localtime()
+    formatted_date = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}_{timestamp.tm_hour:02}-{timestamp.tm_min:02}-{timestamp.tm_sec:02}"
+    LOG_FILE = f"/sd/field_data_{formatted_date}.csv"  # Unique file per run
+
+    # **Create File & Write Header**
+    with open(LOG_FILE, "a") as f:
+        f.write("Timestamp,CO2_ppm,TVOC_ppb,Lux,CPM,uSv/h,Air_Warning,Light_Warning,Radiation_Warning\n")
+
+except OSError:
+    sd_available = False
+    print("🚨 SD Card not found! Logging disabled.")
+    time.sleep(5)  # Pause to show error, then continue running
+
+while True:
+    current_time = time.monotonic()
+
+    # **Geiger Counter - Continuous Fast Polling (UNCHANGED - preserves real-time performance)**
+    if current_time - start_time < count_duration:
+        led.value = (current_time % 1) < 0.5  # Blink LED
+        if not geiger_sensor.value and current_time - last_pulse_time > 0.005:  # Optimized polling
+            pulse_count += 1
+            last_pulse_time = current_time
+            piezo.value = True
+            time.sleep(0.0001)  # Very short beep, doesn't block
+            piezo.value = False
+    else:
+        cpm = pulse_count
+        uSv_h = cpm / alpha
+        pulse_count = 0
+        start_time = time.monotonic()
+
+    # **CO₂ & VOC Sensor - Update Every 3 Seconds**
+    if current_time - voc_last_update >= 3:
+        eCO2, TVOC = sgp30.iaq_measure()
+        air_warnings = get_warning(eCO2, TVOC)
+        voc_last_update = current_time  
+
+    # **Light Sensor - Update Every 2 Seconds (Fast enough for changing conditions)**
+    if current_time - light_last_update >= 2:
+        try:
+            lux = tsl.lux
+            # Handle sensor saturation
+            if lux is None:
+                lux = 120000  # Assume very bright if saturated
+            light_warning = get_light_warning(lux)
+        except:
+            light_warning = "⚠️ Light sensor error"
+        light_last_update = current_time
+
+    rad_warning = get_radiation_warning(uSv_h)
+
+    # **Screen Refresh & Data Logging**
+    if current_time - display_last_update >= 3:
+        timestamp = time.localtime()
+        formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        print("\r" + " " * 150, end="")  # Increased clear space for longer output
+        print(f"\r[{formatted_time}] CO₂: {eCO2} ppm | TVOC: {TVOC} ppb | Lux: {lux:.0f} | CPM: {cpm} | uSv/h: {uSv_h:.3f} | {air_warnings[0]} | {air_warnings[1]} | {light_warning} | {rad_warning}", end="")
+
+        # **Log Data Only If SD Card is Available**
+        if sd_available:
+            with open(LOG_FILE, "a") as f:
+                f.write(f"{formatted_time},{eCO2},{TVOC},{lux:.0f},{cpm},{uSv_h:.3f},{air_warnings[0]},{light_warning},{rad_warning}\n")
+
+        display_last_update = current_time
