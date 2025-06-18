@@ -149,18 +149,21 @@ while True:
 
     # **Geiger Counter - Continuous Fast Polling (UNCHANGED - preserves real-time performance)**
     if current_time - start_time < count_duration:
-        led.value = (current_time % 1) < 0.5  # Blink LED
         if not geiger_sensor.value and current_time - last_pulse_time > 0.005:  # Optimized polling
             pulse_count += 1
             last_pulse_time = current_time
             piezo.value = True
             time.sleep(0.0001)  # Very short beep, doesn't block
             piezo.value = False
+            #print(f"Pulse detected! Total: {pulse_count}")  # Debugging output
     else:
         cpm = pulse_count
         uSv_h = cpm / alpha
         pulse_count = 0
         start_time = time.monotonic()
+
+    # **Heartbeat LED - Continuous blinking to show system is alive**
+    led.value = (current_time % 1) < 0.5  # Blink LED every second
 
     # **CO₂ & VOC Sensor - Update Every 3 Seconds**
     if current_time - voc_last_update >= 3:
@@ -195,3 +198,4 @@ while True:
                 f.write(f"{formatted_time},{eCO2},{TVOC},{lux:.0f},{cpm},{uSv_h:.3f},{air_warnings[0]},{light_warning},{rad_warning}\n")
 
         display_last_update = current_time
+
