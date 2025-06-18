@@ -1,16 +1,9 @@
 """
-AI Field Analyzer v2.1 - Rugged & Portable AI-Enabled Field Instrument
+AI Field Analyzer v1.2 - Rugged & Portable AI-Enabled Field Instrument
 -----------------------------------------------------------------
 A robust and intelligent sensor platform designed for real-world environmental analysis.
-Features radiation detection, VOC and gas analysis, humidity sensing, light/lux measurement,
-AI-powered photo analysis with Google Coral Dev Board Mini integration, and intelligent LED lighting.
-
-NEW FEATURES:
-- Photo capture with AI object/specimen identification
-- Intelligent LED lighting system with lux-based PWM control
-- Flashlight mode for manual illumination
-- Communication with Google Coral Dev Board Mini via UART
-- Confidence-based identification results
+Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
+Engineered for durability, precision, and usability in demanding field conditions.
 
 Project Link: https://hackaday.io/project/203273-ai-field-analyzer
 
@@ -19,34 +12,16 @@ MIT License (See LICENSE file for details)
 © 2025 Apollo Timbers. All rights reserved.
 
 Features:
-- 6-button GUI navigation (Menu, Up, Down, Left, Right, Enter)
-- Manual data capture and waypoint logging
-- Settings menu for sensor calibration
-- Real-time threshold monitoring with alerts
-- Timestamped readings with GPS-style waypoint system
-- AI Photo Analysis with Google Coral integration
-- Intelligent LED lighting system
-- Flashlight mode
-- Logging via CSV to SD card
-- SSD1325 SPI OLED display with menu system
 
-Hardware:
-- Pocket Geiger Counter
-- SGP30 (CO2/TVOC)
-- TSL2591 (Light/Lux)
-- SSD1325 OLED Display (SPI, 128x64, Grayscale)
-- 6 Navigation Buttons
-- Google Coral Dev Board Mini (UART communication)
-- 2x High-Power LEDs (PWM controlled)
-- Camera module (connected to Coral)
+-basic threashold warnings in plain english
+-Timestamped readings
+-Timestamped file names for logging
+-Logging via csv to a SD card (does not log if no SD card is found)
 
-Button Layout:
-[MENU] [UP]   [DOWN]
-[LEFT] [ENTER][RIGHT]
-
-***Enhanced GUI Version with AI Photo Analysis***
-
-***Untested***
+Sensors:
+-Pocket Geiger
+-SGP30
+-TSL2591 (Light/Lux)
 """
 
 import time
@@ -57,161 +32,11 @@ import storage
 import sdcardio
 import adafruit_sgp30
 import adafruit_tsl2591
-import adafruit_ssd1325
-import displayio
-import terminalio
-import pwmio
-import json
-from adafruit_display_text import label
-
-# **Button Setup**
-menu_btn = digitalio.DigitalInOut(board.GP20)
-menu_btn.switch_to_input(pull=digitalio.Pull.UP)
-
-up_btn = digitalio.DigitalInOut(board.GP21)
-up_btn.switch_to_input(pull=digitalio.Pull.UP)
-
-down_btn = digitalio.DigitalInOut(board.GP22)
-down_btn.switch_to_input(pull=digitalio.Pull.UP)
-
-left_btn = digitalio.DigitalInOut(board.GP26)
-left_btn.switch_to_input(pull=digitalio.Pull.UP)
-
-right_btn = digitalio.DigitalInOut(board.GP27)
-right_btn.switch_to_input(pull=digitalio.Pull.UP)
-
-enter_btn = digitalio.DigitalInOut(board.GP28)
-enter_btn.switch_to_input(pull=digitalio.Pull.UP)
-
-# Button state tracking
-button_states = {
-    'menu': True, 'up': True, 'down': True,
-    'left': True, 'right': True, 'enter': True
-}
-last_button_time = 0
-button_debounce = 0.2  # 200ms debounce
-
-# **LED Lighting System Setup**
-# High-power LEDs for photo illumination
-led1_pwm = pwmio.PWMOut(board.GP13, frequency=1000, duty_cycle=0)
-led2_pwm = pwmio.PWMOut(board.GP14, frequency=1000, duty_cycle=0)
-
-# LED control variables
-flashlight_mode = False
-auto_lighting_enabled = True
-current_led_brightness = 0
-min_led_brightness = 10  # Minimum PWM duty cycle (%)
-max_led_brightness = 100  # Maximum PWM duty cycle (%)
-
-def calculate_led_brightness(lux_reading):
-    """Calculate optimal LED brightness based on ambient light"""
-    if lux_reading < 1:  # Very dark
-        return max_led_brightness
-    elif lux_reading < 10:  # Low light
-        return 80
-    elif lux_reading < 50:  # Moderate light
-        return 50
-    elif lux_reading < 200:  # Bright
-        return 20
-    else:  # Very bright
-        return min_led_brightness
-
-def set_led_brightness(brightness_percent):
-    """Set LED brightness as percentage (0-100)"""
-    global current_led_brightness
-    current_led_brightness = max(0, min(100, brightness_percent))
-    duty_cycle = int((current_led_brightness / 100) * 65535)
-    led1_pwm.duty_cycle = duty_cycle
-    led2_pwm.duty_cycle = duty_cycle
-
-def toggle_flashlight():
-    """Toggle flashlight mode on/off"""
-    global flashlight_mode
-    flashlight_mode = not flashlight_mode
-    if flashlight_mode:
-        set_led_brightness(max_led_brightness)
-        print("🔦 Flashlight ON")
-    else:
-        set_led_brightness(0)
-        print("🔦 Flashlight OFF")
-
-# **UART Communication with Google Coral**
-# Communication protocol with Coral Dev Board Mini
-try:
-    uart_coral = busio.UART(board.GP0, board.GP1, baudrate=115200, timeout=1)
-    coral_available = True
-    print("✅ UART connection to Google Coral established")
-except Exception as e:
-    coral_available = False
-    print(f"❌ Coral UART Error: {e}")
-
-def send_coral_command(command, data=None):
-    """Send command to Google Coral Dev Board Mini"""
-    if not coral_available:
-        return {"error": "Coral not available"}
-    
-    try:
-        message = {"command": command}
-        if data:
-            message.update(data)
-        
-        json_message = json.dumps(message) + "\n"
-        uart_coral.write(json_message.encode())
-        
-        # Wait for response (timeout after 10 seconds for photo analysis)
-        timeout = 15 if command == "capture_analyze" else 5
-        start_time = time.monotonic()
-        
-        response_buffer = ""
-        while time.monotonic() - start_time < timeout:
-            if uart_coral.in_waiting > 0:
-                data = uart_coral.read(uart_coral.in_waiting)
-                if data:
-                    response_buffer += data.decode()
-                    if "\n" in response_buffer:
-                        response_line = response_buffer.split("\n")[0]
-                        try:
-                            return json.loads(response_line)
-                        except json.JSONDecodeError:
-                            continue
-            time.sleep(0.1)
-        
-        return {"error": "Timeout waiting for Coral response"}
-        
-    except Exception as e:
-        print(f"Coral communication error: {e}")
-        return {"error": str(e)}
-
-def capture_and_analyze_photo(lux_reading):
-    """Capture photo with optimal lighting and analyze with AI"""
-    if not coral_available:
-        return {"error": "Google Coral not available", "confidence": 0}
-    
-    # Calculate and set optimal lighting
-    if auto_lighting_enabled and not flashlight_mode:
-        optimal_brightness = calculate_led_brightness(lux_reading)
-        set_led_brightness(optimal_brightness)
-        print(f"💡 Auto-lighting: {optimal_brightness}% (Lux: {lux_reading:.1f})")
-        time.sleep(0.5)  # Allow lighting to stabilize
-    
-    # Send capture and analyze command to Coral
-    print("📸 Capturing photo and analyzing...")
-    response = send_coral_command("capture_analyze", {
-        "lighting_level": current_led_brightness,
-        "ambient_lux": lux_reading
-    })
-    
-    # Turn off auto-lighting after capture (unless flashlight mode)
-    if auto_lighting_enabled and not flashlight_mode:
-        set_led_brightness(0)
-    
-    return response
 
 # **Geiger Counter Setup**
 geiger_pin = board.GP7
 led_pin = board.GP2
-piezo_pin = board.GP15  # Changed from GP1 to avoid UART conflict
-
+piezo_pin = board.GP1
 pulse_count = 0
 count_duration = 120  # 2 minutes in seconds
 alpha = 53.032  # uSv to CPM conversion factor
@@ -228,7 +53,7 @@ led.switch_to_output()
 piezo = digitalio.DigitalInOut(piezo_pin)
 piezo.switch_to_output()
 
-# **I2C Bus Setup**
+# **I2C Bus Setup (Shared by SGP30 and TSL2591)**
 i2c = busio.I2C(board.GP5, board.GP4)
 
 # **SGP30 Air Quality Sensor Setup**
@@ -237,494 +62,56 @@ sgp30.iaq_init()
 
 # **TSL2591 Light Sensor Setup**
 tsl = adafruit_tsl2591.TSL2591(i2c)
-tsl.gain = adafruit_tsl2591.GAIN_LOW
+# Configure for outdoor use - lower gain, shorter integration time
+tsl.gain = adafruit_tsl2591.GAIN_LOW  # 1x gain for bright conditions
 tsl.integration_time = adafruit_tsl2591.INTEGRATIONTIME_100MS
 
-# **SSD1325 SPI OLED Display Setup**
-displayio.release_displays()
-
-spi_display = busio.SPI(board.GP10, board.GP11)
-display_cs = board.GP9
-display_dc = board.GP8
-display_reset = board.GP12
-
-display_bus = displayio.FourWire(
-    spi_display,
-    command=display_dc,
-    chip_select=display_cs,
-    reset=display_reset
-)
-
-display = adafruit_displayio_ssd1325.SSD1325(display_bus, width=128, height=64)
-
-# **GUI State Management**
-class GUIState:
-    def __init__(self):
-        self.mode = "sensor"  # sensor, menu, settings, capture, photo, photo_result
-        self.menu_index = 0
-        self.menu_items = ["Take Snapshot", "Take Photo", "View Log", "Flashlight", "Settings", "Exit Menu"]
-        self.settings_index = 0
-        self.settings_items = ["CO2 Threshold", "Rad Threshold", "Auto Save", "Auto Lighting", "LED Brightness", "Display Timeout", "Back"]
-        self.in_submenu = False
-        self.editing_value = False
-        
-        # Settings values
-        self.co2_threshold = 1000
-        self.rad_threshold = 0.5
-        self.auto_save = True
-        self.display_timeout = 30
-        
-        # Photo analysis results
-        self.last_photo_result = None
-        self.photo_confidence = 0
-        self.photo_timestamp = ""
-        
-        # Waypoint system
-        self.waypoint_counter = 1
-        self.last_snapshot_time = 0
-
-gui = GUIState()
-
-# Create display group
-splash = displayio.Group()
-display.show(splash)
-
-def clear_display():
-    """Clear all text elements from display"""
-    while len(splash) > 0:
-        splash.pop()
-
-def check_buttons():
-    """Check button states with debouncing"""
-    global last_button_time
-    current_time = time.monotonic()
-    
-    if current_time - last_button_time < button_debounce:
-        return None
-    
-    # Check each button for press (HIGH to LOW transition)
-    buttons = {
-        'menu': menu_btn.value,
-        'up': up_btn.value,
-        'down': down_btn.value,
-        'left': left_btn.value,
-        'right': right_btn.value,
-        'enter': enter_btn.value
-    }
-    
-    for btn_name, current_state in buttons.items():
-        if button_states[btn_name] and not current_state:  # Button pressed
-            button_states[btn_name] = current_state
-            last_button_time = current_time
-            return btn_name
-        button_states[btn_name] = current_state
-    
-    return None
-
-def show_sensor_display(eCO2, TVOC, cpm, uSv_h, lux):
-    """Main sensor display mode"""
-    clear_display()
-    
-    # Title bar
-    title = label.Label(terminalio.FONT, text="FIELD ANALYZER v2.1", color=0xFFFFFF, x=2, y=6)
-    splash.append(title)
-    
-    # Status indicator
-    status = "OK"
-    status_color = 0x888888
-    if uSv_h > gui.rad_threshold or eCO2 > gui.co2_threshold:
-        if uSv_h > 5.0 or eCO2 > 2000:
-            status = "DANGER"
-            status_color = 0xFFFFFF
-        else:
-            status = "WARN"
-            status_color = 0xCCCCCC
-    
-    status_text = label.Label(terminalio.FONT, text=status, color=status_color, x=95, y=6)
-    splash.append(status_text)
-    
-    # Sensor readings
-    co2_text = label.Label(terminalio.FONT, text=f"CO2: {eCO2:>4} ppm", color=0xFFFFFF, x=2, y=18)
-    voc_text = label.Label(terminalio.FONT, text=f"VOC: {TVOC:>4} ppb", color=0xFFFFFF, x=2, y=28)
-    rad_text = label.Label(terminalio.FONT, text=f"RAD: {uSv_h:>5.2f} uSv/h", color=0xFFFFFF, x=2, y=38)
-    lux_text = label.Label(terminalio.FONT, text=f"LUX: {lux:>5.0f} lx", color=0xFFFFFF, x=2, y=48)
-    
-    splash.append(co2_text)
-    splash.append(voc_text)
-    splash.append(rad_text)
-    splash.append(lux_text)
-    
-    # LED/Flashlight indicator
-    led_status = "🔦 ON" if flashlight_mode else f"💡 {current_led_brightness}%"
-    led_text = label.Label(terminalio.FONT, text=led_status, color=0x888888, x=80, y=48)
-    splash.append(led_text)
-    
-    # Instructions
-    instructions = label.Label(terminalio.FONT, text="MENU for options", color=0x888888, x=2, y=58)
-    splash.append(instructions)
-
-def show_menu():
-    """Display main menu"""
-    clear_display()
-    
-    # Menu title
-    title = label.Label(terminalio.FONT, text="=== MAIN MENU ===", color=0xFFFFFF, x=8, y=6)
-    splash.append(title)
-    
-    # Menu items
-    for i, item in enumerate(gui.menu_items):
-        y_pos = 18 + (i * 7)
-        if y_pos > 58:  # Don't draw beyond screen
-            break
-            
-        color = 0xFFFFFF if i == gui.menu_index else 0x888888
-        prefix = ">" if i == gui.menu_index else " "
-        
-        # Add status indicators for some items
-        display_item = item
-        if item == "Flashlight":
-            display_item = f"{item} {'ON' if flashlight_mode else 'OFF'}"
-        
-        menu_text = label.Label(terminalio.FONT, text=f"{prefix} {display_item}", color=color, x=4, y=y_pos)
-        splash.append(menu_text)
-
-def show_settings():
-    """Display settings menu"""
-    clear_display()
-    
-    title = label.Label(terminalio.FONT, text="=== SETTINGS ===", color=0xFFFFFF, x=10, y=6)
-    splash.append(title)
-    
-    settings_display = [
-        f"CO2 Limit: {gui.co2_threshold}ppm",
-        f"Rad Limit: {gui.rad_threshold}uSv/h", 
-        f"Auto Save: {'ON' if gui.auto_save else 'OFF'}",
-        f"Auto Light: {'ON' if auto_lighting_enabled else 'OFF'}",
-        f"LED Power: {max_led_brightness}%",
-        f"Timeout: {gui.display_timeout}s",
-        "Back to Menu"
-    ]
-    
-    for i, item in enumerate(settings_display):
-        y_pos = 18 + (i * 7)
-        if y_pos > 58:
-            break
-            
-        color = 0xFFFFFF if i == gui.settings_index else 0x888888
-        prefix = ">" if i == gui.settings_index else " "
-        
-        setting_text = label.Label(terminalio.FONT, text=f"{prefix} {item}", color=color, x=4, y=y_pos)
-        splash.append(setting_text)
-
-def show_capture_screen(eCO2, TVOC, uSv_h, lux):
-    """Show data capture confirmation"""
-    clear_display()
-    
-    title = label.Label(terminalio.FONT, text="=== SNAPSHOT ===", color=0xFFFFFF, x=10, y=6)
-    splash.append(title)
-    
-    # Show current readings
-    readings = [
-        f"Waypoint: WP{gui.waypoint_counter:03d}",
-        f"CO2: {eCO2} ppm",
-        f"VOC: {TVOC} ppb", 
-        f"RAD: {uSv_h:.2f} uSv/h",
-        f"LUX: {lux:.0f} lx"
-    ]
-    
-    for i, reading in enumerate(readings):
-        color = 0xFFFFFF if i == 0 else 0xCCCCCC
-        reading_text = label.Label(terminalio.FONT, text=reading, color=color, x=4, y=18 + (i * 8))
-        splash.append(reading_text)
-    
-    instructions = label.Label(terminalio.FONT, text="ENTER=Save MENU=Cancel", color=0x888888, x=2, y=58)
-    splash.append(instructions)
-
-def show_photo_capture_screen(lux):
-    """Show photo capture screen with lighting info"""
-    clear_display()
-    
-    title = label.Label(terminalio.FONT, text="=== PHOTO MODE ===", color=0xFFFFFF, x=8, y=6)
-    splash.append(title)
-    
-    # Show lighting info
-    info_lines = [
-        f"Ambient: {lux:.1f} lux",
-        f"Auto Light: {'ON' if auto_lighting_enabled else 'OFF'}",
-        f"LED Power: {calculate_led_brightness(lux) if auto_lighting_enabled else current_led_brightness}%",
-        f"Coral: {'Ready' if coral_available else 'Offline'}"
-    ]
-    
-    for i, line in enumerate(info_lines):
-        color = 0xFFFFFF if coral_available or i < 3 else 0x888888
-        info_text = label.Label(terminalio.FONT, text=line, color=color, x=4, y=20 + (i * 8))
-        splash.append(info_text)
-    
-    instructions = label.Label(terminalio.FONT, text="ENTER=Capture MENU=Back", color=0x888888, x=2, y=58)
-    splash.append(instructions)
-
-def show_photo_result_screen():
-    """Display photo analysis results"""
-    clear_display()
-    
-    title = label.Label(terminalio.FONT, text="=== AI ANALYSIS ===", color=0xFFFFFF, x=6, y=6)
-    splash.append(title)
-    
-    if gui.last_photo_result:
-        # Truncate long identification names
-        identification = gui.last_photo_result.get("identification", "Unknown")
-        if len(identification) > 18:
-            identification = identification[:15] + "..."
-        
-        confidence = gui.photo_confidence
-        confidence_color = 0xFFFFFF if confidence > 80 else 0xCCCCCC if confidence > 50 else 0x888888
-        
-        result_lines = [
-            f"ID: {identification}",
-            f"Confidence: {confidence:.1f}%",
-            f"Time: {gui.photo_timestamp}"
-        ]
-        
-        for i, line in enumerate(result_lines):
-            color = confidence_color if i == 1 else 0xFFFFFF
-            result_text = label.Label(terminalio.FONT, text=line, color=color, x=4, y=20 + (i * 10))
-            splash.append(result_text)
-        
-        # Show additional details if available
-        if "category" in gui.last_photo_result:
-            category_text = label.Label(terminalio.FONT, text=f"Type: {gui.last_photo_result['category']}", 
-                                      color=0xCCCCCC, x=4, y=50)
-            splash.append(category_text)
-    else:
-        error_text = label.Label(terminalio.FONT, text="Analysis failed", color=0x888888, x=20, y=30)
-        splash.append(error_text)
-    
-    instructions = label.Label(terminalio.FONT, text="Any key to continue", color=0x888888, x=8, y=58)
-    splash.append(instructions)
-
-def take_snapshot(eCO2, TVOC, cpm, uSv_h, lux, ir, visible):
-    """Capture current readings as a waypoint"""
-    timestamp = time.localtime()
-    formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
-    
-    waypoint_data = {
-        'waypoint': f"WP{gui.waypoint_counter:03d}",
-        'timestamp': formatted_time,
-        'co2': eCO2,
-        'tvoc': TVOC,
-        'cpm': cpm,
-        'uSv_h': uSv_h,
-        'lux': lux,
-        'ir': ir,
-        'visible': visible
-    }
-    
-    # Log to SD card if available
-    if sd_available:
-        try:
-            waypoint_file = f"/sd/waypoints_{time.localtime().tm_year}-{time.localtime().tm_mon:02}-{time.localtime().tm_mday:02}.csv"
-            
-            # Check if file exists, if not create with header
-            try:
-                with open(waypoint_file, "r") as f:
-                    pass  # File exists
-            except OSError:
-                with open(waypoint_file, "w") as f:
-                    f.write("Waypoint,Timestamp,CO2_ppm,TVOC_ppb,CPM,uSv_h,Lux,IR,Visible\n")
-            
-            # Append waypoint data
-            with open(waypoint_file, "a") as f:
-                f.write(f"{waypoint_data['waypoint']},{waypoint_data['timestamp']},{waypoint_data['co2']},{waypoint_data['tvoc']},{waypoint_data['cpm']},{waypoint_data['uSv_h']:.3f},{waypoint_data['lux']:.1f},{waypoint_data['ir']:.1f},{waypoint_data['visible']:.1f}\n")
-            
-            print(f"✅ Waypoint {waypoint_data['waypoint']} saved to SD card")
-            
-        except Exception as e:
-            print(f"❌ Error saving waypoint: {e}")
-    
-    gui.waypoint_counter += 1
-    gui.last_snapshot_time = time.monotonic()
-    
-    return waypoint_data
-
-def handle_button_input(button, eCO2, TVOC, cpm, uSv_h, lux, ir, visible):
-    """Handle button presses based on current GUI mode"""
-    global auto_lighting_enabled, max_led_brightness
-    
-    if button == "menu":
-        if gui.mode == "sensor":
-            gui.mode = "menu"
-            gui.menu_index = 0
-        elif gui.mode in ["photo_result", "capture"]:
-            gui.mode = "sensor"
-        else:
-            gui.mode = "sensor"
-    
-    elif gui.mode == "menu":
-        if button == "up":
-            gui.menu_index = (gui.menu_index - 1) % len(gui.menu_items)
-        elif button == "down":
-            gui.menu_index = (gui.menu_index + 1) % len(gui.menu_items)
-        elif button == "enter":
-            selected = gui.menu_items[gui.menu_index]
-            if selected == "Take Snapshot":
-                gui.mode = "capture"
-            elif selected == "Take Photo":
-                gui.mode = "photo"
-            elif selected == "Flashlight":
-                toggle_flashlight()
-            elif selected == "Settings":
-                gui.mode = "settings"
-                gui.settings_index = 0
-            elif selected == "Exit Menu":
-                gui.mode = "sensor"
-            # Add handlers for other menu items later
-    
-    elif gui.mode == "settings":
-        if button == "up":
-            gui.settings_index = (gui.settings_index - 1) % len(gui.settings_items)
-        elif button == "down":
-            gui.settings_index = (gui.settings_index + 1) % len(gui.settings_items)
-        elif button == "enter":
-            selected = gui.settings_items[gui.settings_index]
-            if selected == "Back":
-                gui.mode = "menu"
-            elif selected == "CO2 Threshold":
-                # Toggle between common CO2 thresholds
-                thresholds = [400, 1000, 1500, 2000]
-                current_idx = thresholds.index(gui.co2_threshold) if gui.co2_threshold in thresholds else 0
-                gui.co2_threshold = thresholds[(current_idx + 1) % len(thresholds)]
-            elif selected == "Rad Threshold":
-                # Toggle between radiation thresholds
-                thresholds = [0.1, 0.5, 1.0, 5.0]
-                current_idx = thresholds.index(gui.rad_threshold) if gui.rad_threshold in thresholds else 0
-                gui.rad_threshold = thresholds[(current_idx + 1) % len(thresholds)]
-            elif selected == "Auto Save":
-                gui.auto_save = not gui.auto_save
-            elif selected == "Auto Lighting":
-                auto_lighting_enabled = not auto_lighting_enabled
-                print(f"Auto-lighting: {'ON' if auto_lighting_enabled else 'OFF'}")
-            elif selected == "LED Brightness":
-                # Cycle through brightness levels
-                brightness_levels = [25, 50, 75, 100]
-                current_idx = brightness_levels.index(max_led_brightness) if max_led_brightness in brightness_levels else 0
-                max_led_brightness = brightness_levels[(current_idx + 1) % len(brightness_levels)]
-                print(f"Max LED brightness: {max_led_brightness}%")
-        elif button == "menu":
-            gui.mode = "menu"
-    
-    elif gui.mode == "capture":
-        if button == "enter":
-            take_snapshot(eCO2, TVOC, cpm, uSv_h, lux, ir, visible)
-            gui.mode = "sensor"
-        elif button == "menu":
-            gui.mode = "sensor"
-    
-    elif gui.mode == "photo":
-        if button == "enter":
-            # Capture and analyze photo
-            result = capture_and_analyze_photo(lux)
-            
-            if "error" not in result:
-                gui.last_photo_result = result
-                gui.photo_confidence = result.get("confidence", 0)
-                timestamp = time.localtime()
-                gui.photo_timestamp = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}"
-                
-                # Save photo result to SD card
-                if sd_available:
-                    try:
-                        photo_file = f"/sd/photos_{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}.csv"
-                        
-                        # Create header if file doesn't exist
-                        try:
-                            with open(photo_file, "r") as f:
-                                pass
-                        except OSError:
-                            with open(photo_file, "w") as f:
-                                f.write("Timestamp,Identification,Confidence,Category,Ambient_Lux,LED_Brightness\n")
-                        
-                        # Append photo data
-                        with open(photo_file, "a") as f:
-                            identification = result.get("identification", "Unknown").replace(",", ";")
-                            category = result.get("category", "Unknown")
-                            f.write(f"{gui.photo_timestamp},{identification},{gui.photo_confidence:.1f},{category},{lux:.1f},{current_led_brightness}\n")
-                        
-                        print(f"📸 Photo analysis saved: {identification} ({gui.photo_confidence:.1f}%)")
-                        
-                    except Exception as e:
-                        print(f"❌ Error saving photo result: {e}")
-                
-                gui.mode = "photo_result"
-            else:
-                print(f"❌ Photo capture error: {result.get('error', 'Unknown error')}")
-                gui.mode = "sensor"
-        elif button == "menu":
-            gui.mode = "sensor"
-    
-    elif gui.mode == "photo_result":
-        # Any button press returns to sensor mode
-        gui.mode = "sensor"
+# **Startup Countdown**
+def sensor_startup_timer(seconds):
+    for i in range(seconds, 0, -1):
+        print(f"\r⌛ Sensor Ready in {i}s...", end="")
+        time.sleep(1)
+    print("\r✅ Sensors Ready!")
 
 # **Air Quality Warnings**
 def get_warning(eCO2, TVOC):
     warnings = []
-    warnings.append("✅ Excellent air quality.") if eCO2 < gui.co2_threshold else warnings.append("⚠️ CO₂ rising—ventilate soon.") if eCO2 < 2000 else warnings.append("🚨 Dangerous CO₂ levels!")
+    warnings.append("✅ Excellent air quality.") if eCO2 < 1000 else warnings.append("⚠️ CO₂ rising—ventilate soon.") if eCO2 < 2000 else warnings.append("🚨 Dangerous CO₂ levels!")
     warnings.append("✅ Air is clean.") if TVOC < 500 else warnings.append("⚠️ Chemical odors detected.") if TVOC < 2000 else warnings.append("🚨 High VOC levels!")
     return warnings
 
+# **Light/UV Warnings**
+def get_light_warning(lux):
+    if lux < 200:
+        return "🌙 Low light—flashlight recommended."
+    elif lux < 1000:
+        return "🌤️ Moderate light—good for outdoor work."
+    elif lux < 10000:
+        return "☀️ Bright conditions—sunglasses recommended."
+    elif lux < 50000:
+        return "🌞 Very bright—apply sunscreen & wear hat."
+    elif lux < 100000:
+        return "🔥 Intense sunlight—seek shade frequently."
+    else:
+        return "🚨 Extreme UV—limit exposure to 15 minutes!"
+
+# **Radiation Warnings**
 def get_radiation_warning(uSv_h):
-    if uSv_h < gui.rad_threshold:
+    if uSv_h < 0.5:
         return "✅ Background radiation—no risk."
     elif uSv_h < 5.0:
         return "⚠️ Elevated radiation—limit exposure to 30 min."
     else:
         return "🚨 Dangerous radiation levels—evacuate immediately!"
 
-def get_light_warning(lux, ir, visible):
-    warnings = []
-    if lux < 1:
-        warnings.append("⚫ Dark conditions - use caution")
-    elif lux < 10:
-        warnings.append("🌙 Low light - limited visibility")
-    elif lux > 10000:
-        warnings.append("🔆 Bright sunlight - eye protection advised")
-    
-    if visible > 0:
-        ir_ratio = ir / visible
-        if ir_ratio > 2.0:
-            warnings.append("🔴 High IR signature detected")
-    
-    return warnings
+# **Run Startup Timer**
+sensor_startup_timer(2)
 
-# **Startup**
-def sensor_startup_timer(seconds):
-    for i in range(seconds, 0, -1):
-        clear_display()
-        startup_text = label.Label(terminalio.FONT, text="FIELD ANALYZER v2.1", color=0xFFFFFF, x=8, y=15)
-        countdown_text = label.Label(terminalio.FONT, text=f"Starting in {i}s...", color=0xFFFFFF, x=20, y=25)
-        button_text = label.Label(terminalio.FONT, text="Button GUI Ready", color=0x888888, x=15, y=35)
-        coral_text = label.Label(terminalio.FONT, text=f"Coral: {'Ready' if coral_available else 'Offline'}", 
-                               color=0x888888, x=25, y=45)
-        splash.append(startup_text)
-        splash.append(countdown_text)
-        splash.append(button_text)
-        splash.append(coral_text)
-        print(f"\r⌛ Sensor Ready in {i}s...", end="")
-        time.sleep(1)
-    
-    clear_display()
-    ready_text = label.Label(terminalio.FONT, text="SENSORS READY!", color=0xFFFFFF, x=15, y=30)
-    splash.append(ready_text)
-    print("\r✅ Sensors Ready!")
-    time.sleep(1)
-
-sensor_startup_timer(3)
-
-# **Initialize Variables**
+# **Initialize Sensor Variables**
 eCO2, TVOC = 0, 0  
-lux, ir, visible = 0, 0, 0
+lux = 0
 air_warnings = get_warning(eCO2, TVOC)  
-light_warnings = []
+light_warning = get_light_warning(lux)
 voc_last_update = time.monotonic()  
 light_last_update = time.monotonic()
 display_last_update = time.monotonic()
@@ -733,114 +120,81 @@ display_last_update = time.monotonic()
 start_time = time.monotonic()
 pulse_count = 0
 
-# **SD Card Setup**
+# **SD Card Setup with Error Handling**
 try:
-    spi_sd = busio.SPI(board.GP18, board.GP19, board.GP16)
+    spi = busio.SPI(board.GP18, board.GP19, board.GP16)  
     cs = board.GP17
-    sdcard = sdcardio.SDCard(spi_sd, cs)
+    sdcard = sdcardio.SDCard(spi, cs)
     vfs = storage.VfsFat(sdcard)
     storage.mount(vfs, "/sd")
     sd_available = True
     print("✅ SD Card detected. Data logging enabled.")
 
+    # **Generate Timestamped Filename**
     timestamp = time.localtime()
     formatted_date = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}_{timestamp.tm_hour:02}-{timestamp.tm_min:02}-{timestamp.tm_sec:02}"
-    LOG_FILE = f"/sd/field_data_{formatted_date}.csv"
+    LOG_FILE = f"/sd/field_data_{formatted_date}.csv"  # Unique file per run
 
+    # **Create File & Write Header**
     with open(LOG_FILE, "a") as f:
-        f.write("Timestamp,CO2_ppm,TVOC_ppb,CPM,uSv/h,Lux,IR,Visible,Air_Warning,Radiation_Warning,Light_Warning\n")
+        f.write("Timestamp,CO2_ppm,TVOC_ppb,Lux,CPM,uSv/h,Air_Warning,Light_Warning,Radiation_Warning\n")
 
 except OSError:
     sd_available = False
     print("🚨 SD Card not found! Logging disabled.")
-
-print("🎮 GUI Controls:")
-print("   [MENU] - Toggle menu")
-print("   [UP/DOWN] - Navigate")
-print("   [ENTER] - Select")
-print("   [LEFT/RIGHT] - Adjust values")
-print("📸 Photo Features:")
-print("   - AI identification via Google Coral")
-print("   - Auto-lighting based on ambient lux")
-print("   - Manual flashlight mode")
+    time.sleep(5)  # Pause to show error, then continue running
 
 while True:
     current_time = time.monotonic()
-    
-    # Check for button presses
-    button_pressed = check_buttons()
-    if button_pressed:
-        handle_button_input(button_pressed, eCO2, TVOC, cpm, uSv_h, lux, ir, visible)
 
-    # **Geiger Counter - Continuous Fast Polling**
+    # **Geiger Counter - Continuous Fast Polling (UNCHANGED - preserves real-time performance)**
     if current_time - start_time < count_duration:
-        led.value = (current_time % 1) < 0.5
-        if not geiger_sensor.value and current_time - last_pulse_time > 0.005:
+        if not geiger_sensor.value and current_time - last_pulse_time > 0.005:  # Optimized polling
             pulse_count += 1
             last_pulse_time = current_time
             piezo.value = True
-            time.sleep(0.0001)
+            time.sleep(0.0001)  # Very short beep, doesn't block
             piezo.value = False
+            #print(f"Pulse detected! Total: {pulse_count}")  # Debugging output
     else:
         cpm = pulse_count
         uSv_h = cpm / alpha
         pulse_count = 0
         start_time = time.monotonic()
 
-    # **Sensor Updates**
-    if current_time - voc_last_update >= 3:
-        try:
-            eCO2, TVOC = sgp30.iaq_measure()
-            air_warnings = get_warning(eCO2, TVOC)
-            voc_last_update = current_time
-        except Exception as e:
-            print(f"SGP30 Error: {e}")
+    # **Heartbeat LED - Continuous blinking to show system is alive**
+    led.value = (current_time % 1) < 0.5  # Blink LED every second
 
+    # **CO₂ & VOC Sensor - Update Every 3 Seconds**
+    if current_time - voc_last_update >= 3:
+        eCO2, TVOC = sgp30.iaq_measure()
+        air_warnings = get_warning(eCO2, TVOC)
+        voc_last_update = current_time  
+
+    # **Light Sensor - Update Every 2 Seconds (Fast enough for changing conditions)**
     if current_time - light_last_update >= 2:
         try:
             lux = tsl.lux
-            ir = tsl.infrared
-            visible = tsl.visible
-            light_warnings = get_light_warning(lux, ir, visible)
-            light_last_update = current_time
-        except Exception as e:
-            print(f"TSL2591 Error: {e}")
+            # Handle sensor saturation
+            if lux is None:
+                lux = 120000  # Assume very bright if saturated
+            light_warning = get_light_warning(lux)
+        except:
+            light_warning = "⚠️ Light sensor error"
+        light_last_update = current_time
 
-    # **Display Update**
-    if current_time - display_last_update >= 1:  # Faster GUI updates
-        try:
-            if gui.mode == "sensor":
-                show_sensor_display(eCO2, TVOC, cpm, uSv_h, lux)
-            elif gui.mode == "menu":
-                show_menu()
-            elif gui.mode == "settings":
-                show_settings()
-            elif gui.mode == "capture":
-                show_capture_screen(eCO2, TVOC, uSv_h, lux)
-            elif gui.mode == "photo":
-                show_photo_capture_screen(lux)
-            elif gui.mode == "photo_result":
-                show_photo_result_screen()
-                
-        except Exception as e:
-            print(f"Display Error: {e}")
+    rad_warning = get_radiation_warning(uSv_h)
 
-        # **Data Logging** (if auto-save enabled or manual snapshot taken)
-        if sd_available and (gui.auto_save or (current_time - gui.last_snapshot_time < 1)):
-            try:
-                timestamp = time.localtime()
-                formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
-                
-                with open(LOG_FILE, "a") as f:
-                    light_warning_str = "; ".join(light_warnings) if light_warnings else "Normal"
-                    air_warning_str = "; ".join(air_warnings) if air_warnings else "Normal"
-                    rad_warning_str = get_radiation_warning(uSv_h)
-                    f.write(f"{formatted_time},{eCO2},{TVOC},{cmp},{uSv_h:.3f},{lux:.1f},{ir:.1f},{visible:.1f},{air_warning_str},{rad_warning_str},{light_warning_str}\n")
-            except Exception as e:
-                print(f"SD Card Error: {e}")
+    # **Screen Refresh & Data Logging**
+    if current_time - display_last_update >= 3:
+        timestamp = time.localtime()
+        formatted_time = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        print("\r" + " " * 150, end="")  # Increased clear space for longer output
+        print(f"\r[{formatted_time}] CO₂: {eCO2} ppm | TVOC: {TVOC} ppb | Lux: {lux:.0f} | CPM: {cpm} | uSv/h: {uSv_h:.3f} | {air_warnings[0]} | {air_warnings[1]} | {light_warning} | {rad_warning}", end="")
+
+        # **Log Data Only If SD Card is Available**
+        if sd_available:
+            with open(LOG_FILE, "a") as f:
+                f.write(f"{formatted_time},{eCO2},{TVOC},{lux:.0f},{cpm},{uSv_h:.3f},{air_warnings[0]},{light_warning},{rad_warning}\n")
 
         display_last_update = current_time
-
-    time.sleep(0.05)  # Faster loop for responsive GUI
-
-
