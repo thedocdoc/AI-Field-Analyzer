@@ -1,0 +1,435 @@
+"""
+AI Field Analyzer v1.2 - Rugged & Portable AI-Enabled Field Instrument
+-----------------------------------------------------------------
+A robust and intelligent sensor platform designed for real-world environmental analysis.
+Features radiation detection, VOC and gas analysis, humidity sensing, and light/lux measurement.
+Engineered for durability, precision, and usability in demanding field conditions.
+
+Project Link: https://hackaday.io/project/203273-ai-field-analyzer
+
+MIT License (See LICENSE file for details)
+
+© 2025 Apollo Timbers. All rights reserved.
+
+Features:
+
+-Basic threashold warnings in plain english
+-Timestamped readings
+-Timestamped file names for logging
+-Logging via csv to a SD card (does not log if no SD card is found)
+-Added rotating sensor info on OLED
+
+Sensors:
+-Pocket Geiger
+-SGP30
+-TSL2591 (Light/Lux)
+"""
+
+import time
+import board
+import busio
+import digitalio
+import storage
+import sdcardio
+import adafruit_sgp30
+import adafruit_tsl2591
+import displayio
+import terminalio
+from fourwire import FourWire
+from adafruit_display_text import label
+import adafruit_ssd1325
+
+# **Display Setup**
+displayio.release_displays()
+
+def init_display():
+    """Initialize the SSD1325 OLED display"""
+    print("🖥️  Initializing SSD1325 display...")
+    
+    # Display SPI setup (moved to avoid conflict with built-in SD card)
+    spi = busio.SPI(clock=board.GP14, MOSI=board.GP15)
+    
+    # Display pins
+    oled_cs = board.GP10  # Chip Select
+    oled_dc = board.GP11  # Data/Command  
+    oled_rst = board.GP12 # Reset
+    
+    # Create display bus
+    display_bus = FourWire(
+        spi, 
+        command=oled_dc, 
+        chip_select=oled_cs, 
+        reset=oled_rst,
+        baudrate=1000000
+    )
+    
+    # Initialize display
+    display = adafruit_ssd1325.SSD1325(display_bus, width=128, height=64)
+    
+    print("✅ Display ready!")
+    return display
+
+def create_text_line(text, y_pos, color=0xFFFFFF, x_center=True):
+    """Helper function to create centered text lines"""
+    text_area = label.Label(terminalio.FONT, text=text, color=color)
+    if x_center:
+        text_width = text_area.bounding_box[2]
+        x_pos = (128 - text_width) // 2
+    else:
+        x_pos = 2
+    
+    text_group = displayio.Group(x=x_pos, y=y_pos)
+    text_group.append(text_area)
+    return text_group
+
+def display_screen_1(display, eCO2, TVOC, timestamp_str):
+    """Air Quality Screen"""
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Title (safe distance from top)
+    splash.append(create_text_line("AIR QUALITY", 6, 0xFFFFFF))
+    
+    # Divider line
+    line_bitmap = displayio.Bitmap(100, 1, 1)
+    line_palette = displayio.Palette(1)
+    line_palette[0] = 0x888888
+    line_sprite = displayio.TileGrid(line_bitmap, pixel_shader=line_palette, x=14, y=14)
+    splash.append(line_sprite)
+    
+    # CO2 data
+    splash.append(create_text_line(f"CO2: {eCO2} ppm", 22, 0xCCCCCC))
+    
+    # CO2 status
+    if eCO2 < 1000:
+        co2_status = "EXCELLENT"
+        color = 0xFFFFFF
+    elif eCO2 < 2000:
+        co2_status = "CAUTION"
+        color = 0x888888
+    else:
+        co2_status = "DANGER"
+        color = 0x444444
+    splash.append(create_text_line(co2_status, 32, color))
+    
+    # TVOC data
+    splash.append(create_text_line(f"VOC: {TVOC} ppb", 44, 0xCCCCCC))
+    
+    # Timestamp (perfect spot)
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666))
+
+def display_screen_2(display, lux, light_warning, timestamp_str):
+    """Light/UV Screen"""
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Title (safe distance from top)
+    splash.append(create_text_line("LIGHT & UV", 6, 0xFFFFFF))
+    
+    # Divider
+    line_bitmap = displayio.Bitmap(100, 1, 1)
+    line_palette = displayio.Palette(1)
+    line_palette[0] = 0x888888
+    line_sprite = displayio.TileGrid(line_bitmap, pixel_shader=line_palette, x=14, y=14)
+    splash.append(line_sprite)
+    
+    # Lux reading
+    if lux >= 10000:
+        lux_text = f"{lux/1000:.1f}k lux"
+    else:
+        lux_text = f"{lux:.0f} lux"
+    splash.append(create_text_line(lux_text, 22, 0xCCCCCC))
+    
+    # Light condition
+    if lux < 200:
+        condition = "LOW LIGHT"
+        color = 0x666666
+    elif lux < 1000:
+        condition = "MODERATE"
+        color = 0x888888
+    elif lux < 10000:
+        condition = "BRIGHT"
+        color = 0xAAAAA
+    elif lux < 50000:
+        condition = "VERY BRIGHT"
+        color = 0xCCCCCC
+    else:
+        condition = "INTENSE"
+        color = 0xFFFFFF
+    
+    splash.append(create_text_line(condition, 32, color))
+    
+    # Simple warning
+    if lux > 50000:
+        splash.append(create_text_line("WEAR PROTECTION", 44, 0x888888))
+    
+    # Timestamp (perfect spot)
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666))
+
+def display_screen_3(display, cpm, uSv_h, timestamp_str):
+    """Radiation Screen"""
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Title (safe distance from top)
+    splash.append(create_text_line("RADIATION", 6, 0xFFFFFF))
+    
+    # Divider
+    line_bitmap = displayio.Bitmap(100, 1, 1)
+    line_palette = displayio.Palette(1)
+    line_palette[0] = 0x888888
+    line_sprite = displayio.TileGrid(line_bitmap, pixel_shader=line_palette, x=14, y=14)
+    splash.append(line_sprite)
+    
+    # CPM
+    splash.append(create_text_line(f"CPM: {cpm}", 22, 0xCCCCCC))
+    
+    # uSv/h
+    splash.append(create_text_line(f"uSv/h: {uSv_h:.3f}", 32, 0xCCCCCC))
+    
+    # Safety status
+    if uSv_h < 0.5:
+        status = "SAFE"
+        color = 0xFFFFFF
+    elif uSv_h < 5.0:
+        status = "ELEVATED"
+        color = 0x888888
+    else:
+        status = "DANGER"
+        color = 0x444444
+    
+    splash.append(create_text_line(status, 44, color))
+    
+    # Timestamp (perfect spot)
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666))
+
+def display_screen_4(display, eCO2, TVOC, lux, uSv_h, timestamp_str):
+    """Summary Screen - All sensors"""
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Title (safe distance from top)
+    splash.append(create_text_line("SUMMARY", 6, 0xFFFFFF))
+    
+    # Compact data display
+    splash.append(create_text_line(f"CO2:{eCO2}", 18, 0xCCCCCC, False))
+    splash.append(create_text_line(f"VOC:{TVOC}", 28, 0xCCCCCC, False))
+    
+    if lux >= 1000:
+        lux_display = f"{lux/1000:.1f}k"
+    else:
+        lux_display = f"{lux:.0f}"
+    splash.append(create_text_line(f"LUX:{lux_display}", 38, 0xCCCCCC, False))
+    
+    splash.append(create_text_line(f"RAD:{uSv_h:.2f}", 48, 0xCCCCCC, False))
+    
+    # Timestamp (perfect spot)
+    splash.append(create_text_line(f"Time: {timestamp_str[-8:]}", 60, 0x666666))
+
+def display_startup_screen(display):
+    """Show startup screen"""
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    splash.append(create_text_line("AI FIELD", 8, 0xFFFFFF))
+    splash.append(create_text_line("ANALYZER", 20, 0xFFFFFF))
+    splash.append(create_text_line("v1.3", 32, 0x888888))
+    splash.append(create_text_line("Starting...", 44, 0x666666))
+
+def sensor_startup_timer(display, seconds):
+    """Startup countdown timer"""
+    for i in range(seconds, 0, -1):
+        splash = displayio.Group()
+        display.root_group = splash
+        
+        splash.append(create_text_line("AI FIELD", 8, 0xFFFFFF))
+        splash.append(create_text_line("ANALYZER", 20, 0xFFFFFF))
+        splash.append(create_text_line(f"Ready in {i}s", 35, 0x888888))
+        
+        time.sleep(1)
+
+def check_flashlight_button():
+    """Toggle flashlight when button is pressed with debounce logic"""
+    global flashlight_on, button_last_state, button_press_time
+    
+    current_time = time.monotonic()
+    current_button_state = button.value
+    
+    # Button pressed (goes from True to False due to pull-up)
+    if button_last_state and not current_button_state:
+        # Check if enough time has passed since last press (debounce)
+        if current_time - button_press_time > DEBOUNCE_DELAY:
+            flashlight_on = not flashlight_on
+            flashlight.value = flashlight_on
+            button_press_time = current_time
+            print(f"🔦 Flashlight {'ON' if flashlight_on else 'OFF'}")
+    
+    button_last_state = current_button_state
+
+# **Initialize Display**
+display = init_display()
+display_startup_screen(display)
+
+# **Hardware Setup**
+geiger_pin = board.GP7
+piezo_pin = board.GP20
+pulse_count = 0
+count_duration = 120  # 2 minutes
+alpha = 53.032
+last_pulse_time = 0
+cpm = 0
+uSv_h = 0.0
+
+# Geiger counter
+geiger_sensor = digitalio.DigitalInOut(geiger_pin)
+geiger_sensor.switch_to_input(pull=digitalio.Pull.UP)
+
+# Piezo buzzer
+piezo = digitalio.DigitalInOut(piezo_pin)
+piezo.switch_to_output()
+
+# Button and flashlight
+button = digitalio.DigitalInOut(board.GP3)
+button.switch_to_input(pull=digitalio.Pull.UP)
+flashlight = digitalio.DigitalInOut(board.GP2)
+flashlight.switch_to_output()
+
+# Flashlight state variables with debounce
+flashlight_on = False
+button_last_state = True
+button_press_time = 0
+DEBOUNCE_DELAY = 0.3  # 300ms debounce delay - works better for this button
+
+# **I2C Sensors Setup**
+print("🔧 Setting up I2C sensors...")
+try:
+    i2c = busio.I2C(board.GP5, board.GP4)  # STEMMA standard
+    
+    # SGP30 Air Quality Sensor
+    sgp30 = adafruit_sgp30.Adafruit_SGP30(i2c)
+    sgp30.iaq_init()
+    
+    # TSL2591 Light Sensor
+    tsl = adafruit_tsl2591.TSL2591(i2c)
+    tsl.gain = adafruit_tsl2591.GAIN_LOW
+    tsl.integration_time = adafruit_tsl2591.INTEGRATIONTIME_100MS
+    
+    sensors_ok = True
+    print("✅ I2C sensors initialized")
+    
+except Exception as e:
+    print(f"❌ I2C sensor error: {e}")
+    sensors_ok = False
+
+# **Startup Timer**
+sensor_startup_timer(display, 3)
+
+# **SD Card Setup**
+try:
+    spi_sd = busio.SPI(board.GP18, board.GP19, board.GP16)
+    cs = board.GP17
+    sdcard = sdcardio.SDCard(spi_sd, cs)
+    vfs = storage.VfsFat(sdcard)
+    storage.mount(vfs, "/sd")
+    sd_available = True
+    
+    # Create timestamped filename
+    timestamp = time.localtime()
+    formatted_date = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}_{timestamp.tm_hour:02}-{timestamp.tm_min:02}-{timestamp.tm_sec:02}"
+    LOG_FILE = f"/sd/field_data_{formatted_date}.csv"
+    
+    # Write CSV header
+    with open(LOG_FILE, "a") as f:
+        f.write("Timestamp,CO2_ppm,TVOC_ppb,Lux,CPM,uSv/h\n")
+        
+    print("✅ SD Card logging enabled")
+    
+except Exception as e:
+    sd_available = False
+    print(f"🚨 SD Card setup failed: {e}")
+
+# **Initialize Variables**
+eCO2, TVOC = 400, 0  # Default values
+lux = 0
+voc_last_update = time.monotonic()
+light_last_update = time.monotonic()
+display_last_update = time.monotonic()
+current_screen = 0
+screens_total = 4
+
+# **Main Loop**
+start_time = time.monotonic()
+pulse_count = 0
+
+print("🚀 AI Field Analyzer started with display!")
+
+while True:
+    current_time = time.monotonic()
+    
+    # **Geiger Counter - Fast polling**
+    if current_time - start_time < count_duration:
+        if not geiger_sensor.value and current_time - last_pulse_time > 0.005:
+            pulse_count += 1
+            last_pulse_time = current_time
+            piezo.value = True
+            time.sleep(0.0001)
+            piezo.value = False
+            time.sleep(0.001)  # Small delay to prevent buzzer hum
+    else:
+        cpm = pulse_count
+        uSv_h = cpm / alpha
+        pulse_count = 0
+        start_time = time.monotonic()
+    
+    # **Flashlight Button Check**
+    check_flashlight_button()
+    
+    # **Update Sensors**
+    if sensors_ok:
+        # VOC sensor update every 3 seconds
+        if current_time - voc_last_update >= 3:
+            try:
+                eCO2, TVOC = sgp30.iaq_measure()
+                voc_last_update = current_time
+            except:
+                pass
+        
+        # Light sensor update every 2 seconds
+        if current_time - light_last_update >= 2:
+            try:
+                lux = tsl.lux
+                if lux is None:
+                    lux = 120000
+                light_last_update = current_time
+            except:
+                pass
+    
+    # **Update Display Every 5 Seconds** (slowed down from 2 seconds)
+    if current_time - display_last_update >= 5:
+        timestamp = time.localtime()
+        timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        
+        # Rotate between different display screens
+        if current_screen == 0:
+            display_screen_1(display, eCO2, TVOC, timestamp_str)
+        elif current_screen == 1:
+            display_screen_2(display, lux, "", timestamp_str)
+        elif current_screen == 2:
+            display_screen_3(display, cpm, uSv_h, timestamp_str)
+        elif current_screen == 3:
+            display_screen_4(display, eCO2, TVOC, lux, uSv_h, timestamp_str)
+        
+        current_screen = (current_screen + 1) % screens_total
+        display_last_update = current_time
+        
+        # **Console output**
+        full_timestamp = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        print(f"\r[{full_timestamp}] CO₂:{eCO2} | VOC:{TVOC} | Lux:{lux:.0f} | CPM:{cpm} | uSv/h:{uSv_h:.3f} | Screen:{current_screen+1} | Flash:{'ON' if flashlight_on else 'OFF'}", end="")
+        
+        # **SD Card Logging**
+        if sd_available:
+            try:
+                with open(LOG_FILE, "a") as f:
+                    f.write(f"{full_timestamp},{eCO2},{TVOC},{lux:.0f},{cpm},{uSv_h:.3f}\n")
+            except:
+                pass
