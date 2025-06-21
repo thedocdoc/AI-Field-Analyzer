@@ -83,6 +83,15 @@ LOOP_TIME_THRESHOLD_DANGER = 0.25   # Loop time in seconds for danger
 # Calculated scroll refresh rate
 SCROLL_REFRESH = 1.0 / SCROLL_FPS
 
+# **Global Variables - Initialize early**
+sgp30 = None
+tsl = None
+i2c = None
+eCO2, TVOC = 400, 0
+lux = 0
+sd_available = False
+LOG_FILE = None
+
 # **Performance Monitoring Variables**
 loop_times = []
 performance_update_time = 0
@@ -331,6 +340,12 @@ def update_screen_data(screen_num, eCO2, TVOC, lux, cpm, uSv_h, timestamp_str, r
             current_splash[2][0].text = f"VOC:{TVOC}ppb"
             current_splash[4][0].text = f"Time: {timestamp_str}"
             
+            # Update the warning message based on current CO2 levels
+            warning_msg, warning_color = get_co2_warning(eCO2)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+            
         elif screen_num == 1:  # Light: Title[0], LUX[1], LEVEL[2], Warning[3], Time[4]
             if lux >= 1000:
                 lux_text = f"LUX:{lux/1000:.1f}k"
@@ -352,6 +367,12 @@ def update_screen_data(screen_num, eCO2, TVOC, lux, cpm, uSv_h, timestamp_str, r
             current_splash[2][0].text = f"LEVEL:{condition}"
             current_splash[4][0].text = f"Time: {timestamp_str}"
             
+            # Update the warning message based on current light levels
+            warning_msg, warning_color = get_light_warning(lux)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+            
         elif screen_num == 2:  # Radiation: Title[0], CPM[1], uSv/h[2], Warning[3], Time[4]
             current_splash[1][0].text = f"CPM:{cpm}"
             if radiation_ready:
@@ -359,11 +380,23 @@ def update_screen_data(screen_num, eCO2, TVOC, lux, cpm, uSv_h, timestamp_str, r
             else:
                 current_splash[2][0].text = "uSv/h:WARMING"
             current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on current radiation levels
+            warning_msg, warning_color = get_radiation_warning(uSv_h, radiation_ready)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
                 
         elif screen_num == 3:  # System: Title[0], CPU/MEM[1], TEMP/LOOP[2], Warning[3], Time[4]
             current_splash[1][0].text = f"CPU:{cpu_usage:.0f}% MEM:{memory_usage:.0f}%"
             current_splash[2][0].text = f"TEMP:{cpu_temp:.1f}C LOOP:{avg_loop_time*1000:.0f}ms"
             current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on current system performance
+            warning_msg, warning_color = get_system_warning()
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
             
         elif screen_num == 4:  # Summary: Title[0], CO2/VOC[1], LUX/RAD[2], Warning[3], Time[4]
             current_splash[1][0].text = f"CO2:{eCO2} VOC:{TVOC}"
@@ -373,6 +406,39 @@ def update_screen_data(screen_num, eCO2, TVOC, lux, cpm, uSv_h, timestamp_str, r
                 lux_display = f"{lux:.0f}"
             current_splash[2][0].text = f"LUX:{lux_display} RAD:{uSv_h:.2f}"
             current_splash[4][0].text = f"Time: {timestamp_str[-8:]}"
+            
+            # Update summary alerts
+            alerts = []
+            if eCO2 >= 2000:
+                alerts.append("CO2-DANGER")
+            elif eCO2 >= 1000:
+                alerts.append("CO2-CAUTION")
+                
+            if TVOC >= 2000:
+                alerts.append("VOC-DANGER")
+            elif TVOC >= 500:
+                alerts.append("VOC-CAUTION")
+                
+            if uSv_h >= 5.0:
+                alerts.append("RAD-DANGER")
+            elif uSv_h >= 0.5:
+                alerts.append("RAD-ELEVATED")
+                
+            if lux >= 2000:
+                alerts.append("LIGHT-INTENSE")
+            elif lux >= 500:
+                alerts.append("LIGHT-BRIGHT")
+            
+            if alerts:
+                status_msg = "ALERTS: " + " | ".join(alerts)
+                status_color = 0x888888
+            else:
+                status_msg = "ALL SYSTEMS NORMAL - Environment within safe parameters"
+                status_color = 0xFFFFFF
+                
+            if current_scroll_area:
+                current_scroll_area.text = status_msg
+                current_scroll_area.color = status_color
             
     except Exception as e:
         print(f"⚠️ Display update error: {e}")
@@ -385,16 +451,16 @@ def build_screen_1(display, eCO2, TVOC, timestamp_str):
     splash = displayio.Group()
     display.root_group = splash
     
-    # Static elements
+    # Static elements with 2 pixel gap
     splash.append(create_text_line("AIR QUALITY", 6, 0xFFFFFF))
     splash.append(create_text_line(f"CO2:{eCO2}ppm", 18, 0xCCCCCC, False))
-    splash.append(create_text_line(f"VOC:{TVOC}ppb", 26, 0xCCCCCC, False))
+    splash.append(create_text_line(f"VOC:{TVOC}ppb", 28, 0xCCCCCC, False))  # +2 pixels gap
     
-    # Get warning message
+    # Get warning message - use CO2 for primary warning
     warning_msg, warning_color = get_co2_warning(eCO2)
     
-    # Create scrolling warning (only once)
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 36, warning_color)
+    # Create scrolling warning - moved down 2 pixels
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color)
     splash.append(current_scroll_group)
     
     # Timestamp stays static at bottom
@@ -409,7 +475,7 @@ def build_screen_2(display, lux, timestamp_str):
     splash = displayio.Group()
     display.root_group = splash
     
-    # Static elements
+    # Static elements with 2 pixel gap
     splash.append(create_text_line("LIGHT & UV", 6, 0xFFFFFF))
     
     if lux >= 1000:
@@ -418,7 +484,7 @@ def build_screen_2(display, lux, timestamp_str):
         lux_text = f"LUX:{lux:.0f}"
     splash.append(create_text_line(lux_text, 18, 0xCCCCCC, False))
     
-    # Light condition
+    # Light condition with 2 pixel gap
     if lux < 200:
         condition = "LOW"
     elif lux < 1000:
@@ -430,13 +496,13 @@ def build_screen_2(display, lux, timestamp_str):
     else:
         condition = "INTENSE"
     
-    splash.append(create_text_line(f"LEVEL:{condition}", 26, 0xAAAAA, False))
+    splash.append(create_text_line(f"LEVEL:{condition}", 28, 0xAAAAA, False))  # +2 pixels gap
     
     # Get warning message
     warning_msg, warning_color = get_light_warning(lux)
     
-    # Create scrolling warning (only once)
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 36, warning_color)
+    # Create scrolling warning - moved down 2 pixels
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color)
     splash.append(current_scroll_group)
     
     # Timestamp stays static at bottom
@@ -451,20 +517,20 @@ def build_screen_3(display, cpm, uSv_h, timestamp_str, radiation_ready):
     splash = displayio.Group()
     display.root_group = splash
     
-    # Static elements
+    # Static elements with 2 pixel gap
     splash.append(create_text_line("RADIATION", 6, 0xFFFFFF))
     splash.append(create_text_line(f"CPM:{cpm}", 18, 0xCCCCCC, False))
     
     if radiation_ready:
-        splash.append(create_text_line(f"uSv/h:{uSv_h:.3f}", 26, 0xCCCCCC, False))
+        splash.append(create_text_line(f"uSv/h:{uSv_h:.3f}", 28, 0xCCCCCC, False))  # +2 pixels gap
     else:
-        splash.append(create_text_line("uSv/h:WARMING", 26, 0x888888, False))
+        splash.append(create_text_line("uSv/h:WARMING", 28, 0x888888, False))  # +2 pixels gap
     
     # Get warning message
     warning_msg, warning_color = get_radiation_warning(uSv_h, radiation_ready)
     
-    # Create scrolling warning (only once)
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 36, warning_color)
+    # Create scrolling warning - moved down 2 pixels
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color)
     splash.append(current_scroll_group)
     
     # Timestamp stays static at bottom
@@ -479,16 +545,16 @@ def build_screen_4(display, timestamp_str):
     splash = displayio.Group()
     display.root_group = splash
     
-    # Static elements
+    # Static elements with 2 pixel gap
     splash.append(create_text_line("SYSTEM", 6, 0xFFFFFF))
     splash.append(create_text_line(f"CPU:{cpu_usage:.0f}% MEM:{memory_usage:.0f}%", 18, 0xCCCCCC, False))
-    splash.append(create_text_line(f"TEMP:{cpu_temp:.1f}C LOOP:{avg_loop_time*1000:.0f}ms", 26, 0xCCCCCC, False))
+    splash.append(create_text_line(f"TEMP:{cpu_temp:.1f}C LOOP:{avg_loop_time*1000:.0f}ms", 28, 0xCCCCCC, False))  # +2 pixels gap
     
     # Get system warning message
     warning_msg, warning_color = get_system_warning()
     
-    # Create scrolling warning (only once)
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 36, warning_color)
+    # Create scrolling warning - moved down 2 pixels
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color)
     splash.append(current_scroll_group)
     
     # Timestamp stays static at bottom
@@ -503,7 +569,7 @@ def build_screen_5(display, eCO2, TVOC, lux, uSv_h, timestamp_str):
     splash = displayio.Group()
     display.root_group = splash
     
-    # Static elements
+    # Static elements with 2 pixel gap
     splash.append(create_text_line("SUMMARY", 6, 0xFFFFFF))
     splash.append(create_text_line(f"CO2:{eCO2} VOC:{TVOC}", 16, 0xCCCCCC, False))
     
@@ -511,7 +577,7 @@ def build_screen_5(display, eCO2, TVOC, lux, uSv_h, timestamp_str):
         lux_display = f"{lux/1000:.1f}k"
     else:
         lux_display = f"{lux:.0f}"
-    splash.append(create_text_line(f"LUX:{lux_display} RAD:{uSv_h:.2f}", 24, 0xCCCCCC, False))
+    splash.append(create_text_line(f"LUX:{lux_display} RAD:{uSv_h:.2f}", 26, 0xCCCCCC, False))  # +2 pixels gap
     
     # Overall status message
     alerts = []
@@ -542,8 +608,8 @@ def build_screen_5(display, eCO2, TVOC, lux, uSv_h, timestamp_str):
         status_msg = "ALL SYSTEMS NORMAL - Environment within safe parameters"
         status_color = 0xFFFFFF
     
-    # Create scrolling status (only once)
-    current_scroll_group, current_scroll_area = create_scrolling_text(status_msg, 36, status_color)
+    # Create scrolling status - moved down 2 pixels
+    current_scroll_group, current_scroll_area = create_scrolling_text(status_msg, 38, status_color)
     splash.append(current_scroll_group)
     
     # Timestamp stays static at bottom
@@ -560,13 +626,22 @@ def display_startup_screen(display):
     splash.append(create_text_line("ANALYZER", 20, 0xFFFFFF, True, 1))
     splash.append(create_text_line("v1.5", 32, 0x888888))
     splash.append(create_text_line("Simple & Fast", 44, 0x666666))
+    
+    # Show startup screen for 3 seconds before countdown
+    time.sleep(3)
 
 def sensor_startup_timer_with_init(display):
-    """Startup countdown with background initialization"""
+    """Startup countdown with background initialization - FIXED"""
+    global sgp30, tsl, eCO2, TVOC, lux, i2c  # CRITICAL FIX: Add global declarations
+    
     start_time = time.monotonic()
     last_second_shown = 10  # Start higher to trigger first update
     init_step = 0
     sensors_ok = False
+    
+    # Initialize default values
+    eCO2, TVOC = 400, 0
+    lux = 0
     
     # Initialization steps to do during countdown
     while True:
@@ -626,7 +701,6 @@ def sensor_startup_timer_with_init(display):
             
         elif init_step == 1 and elapsed >= 2.0:  # SGP30 at 6s remaining
             try:
-                global sgp30
                 sgp30 = adafruit_sgp30.Adafruit_SGP30(i2c)
                 sgp30.iaq_init()
                 print("✅ SGP30 air quality sensor ready")
@@ -638,7 +712,6 @@ def sensor_startup_timer_with_init(display):
                 
         elif init_step == 2 and elapsed >= 3.0:  # TSL2591 at 5s remaining
             try:
-                global tsl
                 tsl = adafruit_tsl2591.TSL2591(i2c)
                 tsl.gain = adafruit_tsl2591.GAIN_LOW
                 tsl.integration_time = adafruit_tsl2591.INTEGRATIONTIME_100MS
@@ -674,7 +747,28 @@ def sensor_startup_timer_with_init(display):
         elif init_step == 4 and elapsed >= 6.5:  # Final prep at 1.5s remaining
             print("⚡ Initializing radiation detection...")
             print("🔧 Starting performance monitoring...")
-            # Any final setup can go here
+            
+            # CRITICAL FIX: Take initial sensor readings here
+            if sensors_ok and sgp30 and tsl:
+                print("📊 Taking initial sensor readings...")
+                try:
+                    # Get initial air quality reading
+                    eCO2, TVOC = sgp30.iaq_measure()
+                    print(f"✅ Initial air quality: CO2={eCO2}, TVOC={TVOC}")
+                except Exception as e:
+                    print(f"⚠️ Initial air quality read failed: {e}")
+                    eCO2, TVOC = 400, 0
+                
+                try:
+                    # Get initial light reading
+                    lux = tsl.lux
+                    if lux is None:
+                        lux = 120000
+                    print(f"✅ Initial light level: {lux:.0f} lux")
+                except Exception as e:
+                    print(f"⚠️ Initial light read failed: {e}")
+                    lux = 0
+            
             print("🎯 All systems ready!")
             init_step = 5
         
@@ -728,28 +822,31 @@ button = digitalio.DigitalInOut(board.GP3)
 button.switch_to_input(pull=digitalio.Pull.UP)
 flashlight = digitalio.DigitalInOut(board.GP2)
 flashlight.switch_to_output()
+flashlight.value = False  # Force OFF at startup
 
 # Flashlight state variables with debounce
 flashlight_on = False  # Start with flashlight OFF
 button_last_state = True
 button_press_time = 0
 
-# **I2C Sensors Setup & Startup Timer Combined**
+# **I2C Sensors Setup & Startup Timer Combined - FIXED**
 print("🚀 Starting AI Field Analyzer v1.5 - Simple & Fast...")
+
+# CRITICAL FIX: Call startup function with proper global handling
 sensors_ok, sgp30, tsl = sensor_startup_timer_with_init(display)
 
-# Show first screen immediately after countdown
+# Show first screen immediately after countdown with REAL data
 print("🎯 Transitioning to main display...")
 timestamp = time.localtime()
 timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
 
 # Initialize performance metrics early so system screen has data
 update_performance_metrics()
-current_splash = build_screen_1(display, 400, 0, timestamp_str)  # Start with air quality screen
 
-# **Initialize Variables**
-eCO2, TVOC = 400, 0  # Default values
-lux = 0
+# CRITICAL FIX: Use the actual sensor values that were read during startup
+current_splash = build_screen_1(display, eCO2, TVOC, timestamp_str)
+
+# **Initialize Variables - FIXED: Remove duplicate assignments**
 voc_last_update = time.monotonic()
 light_last_update = time.monotonic()
 display_last_update = time.monotonic()
@@ -761,7 +858,6 @@ radiation_start_time = time.monotonic()  # Track radiation warmup
 current_screen = 0
 screens_total = 5  # Updated to 5 screens
 scroll_offsets = [0, 0, 0, 0, 0]  # Track scroll position for each screen
-current_splash = None  # Keep track of current display group
 current_scroll_group = None  # Keep track of scrolling text group
 current_scroll_area = None  # Keep track of scrolling text area
 
