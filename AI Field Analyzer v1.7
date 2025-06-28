@@ -1,0 +1,1647 @@
+"""
+AI Field Analyzer v1.7 - Advanced Tricorder-Style Field Instrument with Storm Prediction
+---------------------------------------------------------------------------------------
+A sophisticated and intelligent multi-sensor platform designed for comprehensive 
+environmental analysis. Features real-time radiation detection, air quality monitoring, 
+light/UV measurement, barometric pressure with storm prediction, system performance 
+monitoring, and intelligent safety warnings with scrolling display. 
+Optimized for maximum radiation detection sensitivity.
+
+Project Link: https://hackaday.io/project/203273-ai-field-analyzer
+MIT License (See LICENSE file for details)
+© 2025 Apollo Timbers. All rights reserved.
+
+NEW in v1.7:
+- BMP180 barometric pressure sensor integration
+- Advanced storm prediction algorithm with 24-hour pressure history
+- Weather trend analysis with pressure change rates
+- Storm warnings with severity levels and timing predictions
+- Enhanced environmental correlations (pressure vs humidity/temp)
+- 7-screen rotation including dedicated Weather/Storm screen
+- Pressure-based altitude estimation for field work
+- Aviation mode for pressure monitoring during flight
+
+Features:
+- Verbose safety warnings with actionable timing recommendations
+- Storm prediction based on pressure trends and environmental correlations
+- Real-time meteorological analysis with professional-grade alerts
+- Scrolling text display with weather warnings
+- Real-time sensor data updates with live timestamps
+- System performance monitoring with upgrade recommendations
+- Radiation sensor warmup period with status indicators
+- Configurable display timing and scroll speeds
+- Debounced flashlight button for field operations
+- Simple, reliable CSV logging to SD card with weather data
+- 7-screen rotating display: CO2/VOC, Temp/Humid, Light/UV, Weather/Storm, Radiation, System, Summary
+- Star Trek-style tricorder interface with smooth animations
+- Low battery warning from PowerBoost 1000C LBO pin
+
+Sensors:
+- Pocket Geiger Counter (radiation detection with CPM and µSv/h)
+- SCD41 (Real CO2, temperature, humidity, and VOC analysis)
+- TSL2591 (Light/Lux measurement with safety warnings)
+- BMP180 (Barometric pressure with storm prediction capabilities)
+
+Display:
+- SSD1325 128x64 OLED with 4-bit grayscale
+- Rotating screens every 12 seconds (configurable)
+- Scrolling safety messages with color-coded warnings
+- Real-time data updates every 2 seconds
+
+Hardware Platform:
+- Raspberry Pi Pico or Pico 2 (CircuitPython)
+- Custom pin configuration optimized for sensor integration
+- Built-in SD card logging with simple, reliable writes
+- PowerBoost 1000C battery management with low battery detection
+"""
+
+import time
+import board
+import busio
+import digitalio
+import storage
+import sdcardio
+import adafruit_scd4x
+import adafruit_tsl2591
+import displayio
+import terminalio
+from fourwire import FourWire
+from adafruit_display_text import label
+import adafruit_ssd1325
+import gc
+import microcontroller
+import math
+import struct
+
+# **CONFIGURATION VARIABLES - Optimized for performance**
+SCREEN_DURATION = 12        # Seconds to stay on each screen
+SCROLL_SPEED = 2           # Pixels per frame for text scrolling  
+SCROLL_FPS = 15            # Reduced FPS for better performance
+DEBOUNCE_DELAY = 0.2       # Button debounce delay in seconds
+STARTUP_COUNTDOWN = 8      # Startup countdown duration in seconds
+RADIATION_WARMUP = 120     # Radiation sensor warmup time in seconds
+DATA_UPDATE_RATE = 3       # Update sensor data every 3 seconds
+SD_LOG_INTERVAL = 30       # Write to SD every 30 seconds
+BATTERY_CHECK_INTERVAL = 60  # Check battery every 60 seconds (1 minute)
+PRESSURE_HISTORY_INTERVAL = 300  # Store pressure reading every 5 minutes
+PRESSURE_HISTORY_SIZE = 288      # 24 hours of 5-minute intervals (288 * 5min = 24hr)
+
+# Performance monitoring thresholds
+CPU_THRESHOLD_CAUTION = 70  # CPU usage % for caution
+CPU_THRESHOLD_DANGER = 85   # CPU usage % for danger
+MEMORY_THRESHOLD_CAUTION = 80  # Memory usage % for caution
+MEMORY_THRESHOLD_DANGER = 90   # Memory usage % for danger
+LOOP_TIME_THRESHOLD_CAUTION = 0.15  # Loop time in seconds for caution
+LOOP_TIME_THRESHOLD_DANGER = 0.25   # Loop time in seconds for danger
+
+# Storm prediction thresholds (pressure change in hPa/hour)
+PRESSURE_RAPID_FALL = -3.0    # Rapid pressure drop (severe weather likely)
+PRESSURE_FAST_FALL = -1.5     # Fast pressure drop (weather change coming)
+PRESSURE_SLOW_FALL = -0.5     # Slow pressure drop (watch for changes)
+PRESSURE_RAPID_RISE = 3.0     # Rapid pressure rise (clearing weather)
+PRESSURE_FAST_RISE = 1.5      # Fast pressure rise (improving conditions)
+
+# Calculated scroll refresh rate
+SCROLL_REFRESH = 1.0 / SCROLL_FPS
+
+# **Global Variables - Initialize early**
+scd41 = None
+tsl = None
+bmp = None  # Will be our custom BMP180 driver
+i2c = None
+CO2, temperature, humidity, VOC = 400, 25.0, 50.0, 0
+lux = 0
+pressure_hpa = 1013.25
+altitude_m = 0
+sd_available = False
+LOG_FILE = None
+battery_low = False
+
+class SimpleBMP180:
+    """Custom BMP180 driver for pressure and temperature"""
+    
+    def __init__(self, i2c_bus):
+        self.i2c = i2c_bus
+        self.address = 0x77
+        
+        # BMP180 calibration coefficients
+        self.cal_AC1 = 0
+        self.cal_AC2 = 0
+        self.cal_AC3 = 0
+        self.cal_AC4 = 0
+        self.cal_AC5 = 0
+        self.cal_AC6 = 0
+        self.cal_B1 = 0
+        self.cal_B2 = 0
+        self.cal_MB = 0
+        self.cal_MC = 0
+        self.cal_MD = 0
+        
+        # Check if device is present and read calibration
+        if self._check_device():
+            self._read_calibration()
+            print("✅ BMP180 initialized successfully")
+        else:
+            raise RuntimeError("BMP180 not found at 0x77")
+    
+    def _check_device(self):
+        """Check if BMP180 is present by reading chip ID"""
+        try:
+            while not self.i2c.try_lock():
+                pass
+            
+            # Read chip ID register (0xD0) - should return 0x55 for BMP180
+            self.i2c.writeto(self.address, bytes([0xD0]))
+            result = bytearray(1)
+            self.i2c.readfrom_into(self.address, result)
+            chip_id = result[0]
+            
+            return chip_id == 0x55
+                
+        except Exception:
+            return False
+        finally:
+            self.i2c.unlock()
+    
+    def _read_calibration(self):
+        """Read calibration coefficients from EEPROM"""
+        try:
+            while not self.i2c.try_lock():
+                pass
+            
+            # Read 22 bytes of calibration data starting at 0xAA
+            self.i2c.writeto(self.address, bytes([0xAA]))
+            cal_data = bytearray(22)
+            self.i2c.readfrom_into(self.address, cal_data)
+            
+            # Unpack calibration coefficients (big-endian format)
+            self.cal_AC1 = struct.unpack('>h', cal_data[0:2])[0]
+            self.cal_AC2 = struct.unpack('>h', cal_data[2:4])[0]
+            self.cal_AC3 = struct.unpack('>h', cal_data[4:6])[0]
+            self.cal_AC4 = struct.unpack('>H', cal_data[6:8])[0]
+            self.cal_AC5 = struct.unpack('>H', cal_data[8:10])[0]
+            self.cal_AC6 = struct.unpack('>H', cal_data[10:12])[0]
+            self.cal_B1 = struct.unpack('>h', cal_data[12:14])[0]
+            self.cal_B2 = struct.unpack('>h', cal_data[14:16])[0]
+            self.cal_MB = struct.unpack('>h', cal_data[16:18])[0]
+            self.cal_MC = struct.unpack('>h', cal_data[18:20])[0]
+            self.cal_MD = struct.unpack('>h', cal_data[20:22])[0]
+            
+        except Exception as e:
+            print(f"❌ Error reading calibration: {e}")
+            raise
+        finally:
+            self.i2c.unlock()
+    
+    def _read_raw_temperature(self):
+        """Read raw temperature data"""
+        try:
+            while not self.i2c.try_lock():
+                pass
+            
+            # Start temperature measurement
+            self.i2c.writeto(self.address, bytes([0xF4, 0x2E]))
+            time.sleep(0.005)  # Wait 4.5ms for measurement
+            
+            # Read temperature result
+            self.i2c.writeto(self.address, bytes([0xF6]))
+            temp_data = bytearray(2)
+            self.i2c.readfrom_into(self.address, temp_data)
+            
+            raw_temp = (temp_data[0] << 8) + temp_data[1]
+            return raw_temp
+            
+        finally:
+            self.i2c.unlock()
+    
+    def _read_raw_pressure(self, oss=0):
+        """Read raw pressure data (oss = oversampling setting 0-3)"""
+        try:
+            while not self.i2c.try_lock():
+                pass
+            
+            # Start pressure measurement
+            cmd = 0x34 + (oss << 6)
+            self.i2c.writeto(self.address, bytes([0xF4, cmd]))
+            
+            # Wait time depends on oversampling
+            wait_times = [0.005, 0.008, 0.014, 0.026]  # 4.5ms, 7.5ms, 13.5ms, 25.5ms
+            time.sleep(wait_times[oss])
+            
+            # Read pressure result (3 bytes)
+            self.i2c.writeto(self.address, bytes([0xF6]))
+            press_data = bytearray(3)
+            self.i2c.readfrom_into(self.address, press_data)
+            
+            raw_pressure = ((press_data[0] << 16) + (press_data[1] << 8) + press_data[2]) >> (8 - oss)
+            return raw_pressure
+            
+        finally:
+            self.i2c.unlock()
+    
+    @property
+    def temperature(self):
+        """Get compensated temperature in Celsius"""
+        raw_temp = self._read_raw_temperature()
+        
+        # Calculate true temperature using calibration coefficients
+        X1 = ((raw_temp - self.cal_AC6) * self.cal_AC5) >> 15
+        X2 = (self.cal_MC << 11) // (X1 + self.cal_MD)
+        B5 = X1 + X2
+        
+        temp_c = ((B5 + 8) >> 4) / 10.0
+        return temp_c
+    
+    @property
+    def pressure(self):
+        """Get compensated pressure in hPa"""
+        # Read raw temperature first (needed for pressure calculation)
+        raw_temp = self._read_raw_temperature()
+        raw_pressure = self._read_raw_pressure(oss=0)  # Standard precision
+        
+        # Calculate B5 (needed for pressure compensation)
+        X1 = ((raw_temp - self.cal_AC6) * self.cal_AC5) >> 15
+        X2 = (self.cal_MC << 11) // (X1 + self.cal_MD)
+        B5 = X1 + X2
+        
+        # Calculate true pressure
+        B6 = B5 - 4000
+        X1 = (self.cal_B2 * ((B6 * B6) >> 12)) >> 11
+        X2 = (self.cal_AC2 * B6) >> 11
+        X3 = X1 + X2
+        B3 = (((self.cal_AC1 * 4 + X3) << 0) + 2) >> 2
+        
+        X1 = (self.cal_AC3 * B6) >> 13
+        X2 = (self.cal_B1 * ((B6 * B6) >> 12)) >> 16
+        X3 = ((X1 + X2) + 2) >> 2
+        B4 = (self.cal_AC4 * (X3 + 32768)) >> 15
+        B7 = (raw_pressure - B3) * (50000 >> 0)
+        
+        if B7 < 0x80000000:
+            pressure_pa = (B7 * 2) // B4
+        else:
+            pressure_pa = (B7 // B4) * 2
+        
+        X1 = (pressure_pa >> 8) * (pressure_pa >> 8)
+        X1 = (X1 * 3038) >> 16
+        X2 = (-7357 * pressure_pa) >> 16
+        pressure_pa = pressure_pa + ((X1 + X2 + 3791) >> 4)
+        
+        # Convert Pa to hPa
+        pressure_hpa = pressure_pa / 100.0
+        return pressure_hpa
+    
+    @property 
+    def altitude(self):
+        """Calculate altitude based on pressure"""
+        pressure_hpa = self.pressure
+        altitude_m = 44330 * (1 - (pressure_hpa / 1013.25) ** 0.1903)
+        return altitude_m
+
+# **Weather Prediction Variables**
+pressure_history = []  # Store pressure readings over time
+pressure_trend = "STABLE"  # RISING, FALLING, STABLE
+pressure_change_rate = 0.0  # hPa per hour
+storm_risk = "LOW"  # LOW, MODERATE, HIGH, SEVERE
+weather_forecast = "STABLE CONDITIONS"
+
+# **Performance Monitoring Variables**
+loop_times = []
+performance_update_time = 0
+cpu_usage = 0.0
+memory_usage = 0.0
+avg_loop_time = 0.0
+max_loop_time = 0.0
+cpu_temp = 25.0  # CPU temperature in Celsius
+
+def setup_sd_logging():
+    """Simple SD card setup that works"""
+    global sd_available, LOG_FILE
+    
+    try:
+        spi = busio.SPI(board.GP18, board.GP19, board.GP16)
+        cs = board.GP17
+        sdcard = sdcardio.SDCard(spi, cs)
+        vfs = storage.VfsFat(sdcard)
+        storage.mount(vfs, "/sd")
+        sd_available = True
+        print("✅ SD Card detected. Data logging enabled.")
+
+        # Generate timestamped filename
+        timestamp = time.localtime()
+        formatted_date = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}_{timestamp.tm_hour:02}-{timestamp.tm_min:02}-{timestamp.tm_sec:02}"
+        LOG_FILE = f"/sd/field_data_{formatted_date}.csv"
+
+        # Create file & write header with weather data fields
+        with open(LOG_FILE, "a") as f:
+            f.write("Timestamp,CO2_ppm,VOC_ppb,Temperature_C,Humidity_%,Lux,Pressure_hPa,Altitude_m,Pressure_Trend,Storm_Risk,CPM,uSv/h,CPU_%,Memory_%,Loop_ms,CPU_Temp_C,Battery_Status\n")
+        
+        print(f"✅ SD logging to: {LOG_FILE}")
+        return True
+
+    except OSError:
+        sd_available = False
+        LOG_FILE = None
+        print("🚨 SD Card not found! Logging disabled.")
+        return False
+
+def log_to_sd(timestamp, co2, voc, temp, humidity, lux, pressure, altitude, pressure_trend, storm_risk, cpm, usv_h, cpu, memory, loop_ms, cpu_temp, battery_status):
+    """Enhanced SD logging with weather data"""
+    if sd_available and LOG_FILE:
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(f"{timestamp},{co2},{voc},{temp:.1f},{humidity:.1f},{lux:.0f},{pressure:.1f},{altitude:.1f},{pressure_trend},{storm_risk},{cpm},{usv_h:.3f},{cpu:.1f},{memory:.1f},{loop_ms:.1f},{cpu_temp:.1f},{battery_status}\n")
+            return True
+        except:
+            print("❌ SD write failed")
+            return False
+    return False
+
+def update_pressure_history(current_pressure):
+    """Maintain 24-hour pressure history for storm prediction"""
+    global pressure_history, pressure_trend, pressure_change_rate, storm_risk, weather_forecast
+    
+    current_time = time.monotonic()
+    
+    # Add current reading with timestamp
+    pressure_history.append((current_time, current_pressure))
+    
+    # Remove readings older than 24 hours
+    cutoff_time = current_time - (24 * 3600)  # 24 hours ago
+    pressure_history = [(t, p) for t, p in pressure_history if t > cutoff_time]
+    
+    # Calculate pressure trends and predictions
+    analyze_pressure_trends()
+
+def analyze_pressure_trends():
+    """Analyze pressure trends for storm prediction"""
+    global pressure_trend, pressure_change_rate, storm_risk, weather_forecast
+    
+    if len(pressure_history) < 2:
+        pressure_trend = "INSUFFICIENT_DATA"
+        pressure_change_rate = 0.0
+        storm_risk = "UNKNOWN"
+        weather_forecast = "Collecting baseline data..."
+        return
+    
+    # Calculate 1-hour, 3-hour, and 6-hour pressure changes
+    current_time = time.monotonic()
+    current_pressure = pressure_history[-1][1]
+    
+    # Find pressure readings from 1, 3, and 6 hours ago
+    one_hour_ago = current_time - 3600
+    three_hours_ago = current_time - (3 * 3600)
+    six_hours_ago = current_time - (6 * 3600)
+    
+    # Find closest readings to these times
+    pressure_1h = find_closest_pressure(one_hour_ago)
+    pressure_3h = find_closest_pressure(three_hours_ago)
+    pressure_6h = find_closest_pressure(six_hours_ago)
+    
+    # Calculate hourly change rate (most important for immediate prediction)
+    if pressure_1h is not None:
+        pressure_change_rate = current_pressure - pressure_1h
+    else:
+        pressure_change_rate = 0.0
+    
+    # Determine trend
+    if pressure_change_rate > 0.5:
+        pressure_trend = "RISING"
+    elif pressure_change_rate < -0.5:
+        pressure_trend = "FALLING"
+    else:
+        pressure_trend = "STABLE"
+    
+    # Storm risk assessment based on pressure change rates and patterns
+    assess_storm_risk(current_pressure, pressure_1h, pressure_3h, pressure_6h)
+
+def find_closest_pressure(target_time):
+    """Find pressure reading closest to target time"""
+    if not pressure_history:
+        return None
+    
+    closest_reading = min(pressure_history, key=lambda x: abs(x[0] - target_time))
+    
+    # Only return if within 30 minutes of target time
+    if abs(closest_reading[0] - target_time) <= 1800:  # 30 minutes
+        return closest_reading[1]
+    return None
+
+def assess_storm_risk(current_p, pressure_1h, pressure_3h, pressure_6h):
+    """Assess storm risk based on pressure patterns"""
+    global storm_risk, weather_forecast
+    
+    if pressure_1h is None:
+        storm_risk = "UNKNOWN"
+        weather_forecast = "Insufficient data for prediction"
+        return
+    
+    # Calculate change rates
+    change_1h = current_p - pressure_1h if pressure_1h else 0
+    change_3h = (current_p - pressure_3h) / 3 if pressure_3h else 0
+    change_6h = (current_p - pressure_6h) / 6 if pressure_6h else 0
+    
+    # Storm risk assessment
+    if change_1h <= PRESSURE_RAPID_FALL:
+        storm_risk = "SEVERE"
+        if change_3h <= -2.0:
+            weather_forecast = "SEVERE STORM IMMINENT - Seek shelter immediately!"
+        else:
+            weather_forecast = "STRONG STORM APPROACHING - Take precautions within 2-4 hours"
+    
+    elif change_1h <= PRESSURE_FAST_FALL:
+        storm_risk = "HIGH"
+        if change_3h <= -1.0:
+            weather_forecast = "STORM LIKELY - Weather deteriorating in 4-8 hours"
+        else:
+            weather_forecast = "UNSETTLED WEATHER - Monitor conditions closely"
+    
+    elif change_1h <= PRESSURE_SLOW_FALL:
+        storm_risk = "MODERATE"
+        weather_forecast = "WEATHER CHANGE POSSIBLE - Conditions may deteriorate slowly"
+    
+    elif change_1h >= PRESSURE_RAPID_RISE:
+        storm_risk = "CLEARING"
+        weather_forecast = "RAPID CLEARING - Conditions improving quickly"
+    
+    elif change_1h >= PRESSURE_FAST_RISE:
+        storm_risk = "IMPROVING"
+        weather_forecast = "WEATHER IMPROVING - Clearing conditions ahead"
+    
+    else:
+        storm_risk = "LOW"
+        weather_forecast = "STABLE CONDITIONS - No significant weather changes expected"
+    
+    # Special case: Very low absolute pressure
+    if current_p < 980:
+        if storm_risk not in ["SEVERE", "HIGH"]:
+            storm_risk = "HIGH"
+        weather_forecast = f"LOW PRESSURE SYSTEM - {weather_forecast}"
+    
+    # Special case: Very high pressure
+    elif current_p > 1030:
+        storm_risk = "LOW"
+        weather_forecast = "HIGH PRESSURE - Stable, clear conditions likely"
+
+def estimate_altitude(pressure_hpa, sea_level_pressure=1013.25):
+    """Estimate altitude based on barometric pressure"""
+    # Standard atmospheric pressure formula
+    # h = (1 - (P/P0)^0.1903) * 44307.69 meters
+    if pressure_hpa <= 0:
+        return 0
+    
+    try:
+        altitude = (1 - (pressure_hpa / sea_level_pressure) ** 0.1903) * 44307.69
+        return max(0, altitude)  # Don't return negative altitudes
+    except:
+        return 0
+
+# **Display Setup**
+displayio.release_displays()
+
+def init_display():
+    """Initialize the SSD1325 OLED display"""
+    print("🖥️  Initializing SSD1325 display...")
+    
+    # Display SPI setup
+    spi = busio.SPI(clock=board.GP14, MOSI=board.GP15)
+    
+    # Display pins
+    oled_cs = board.GP10  # Chip Select
+    oled_dc = board.GP11  # Data/Command  
+    oled_rst = board.GP12 # Reset
+    
+    # Create display bus
+    display_bus = FourWire(
+        spi, 
+        command=oled_dc, 
+        chip_select=oled_cs, 
+        reset=oled_rst,
+        baudrate=1000000
+    )
+    
+    # Initialize display
+    display = adafruit_ssd1325.SSD1325(display_bus, width=128, height=64)
+    
+    print("✅ Display ready!")
+    return display
+
+def check_battery_status():
+    """Check PowerBoost 1000C low battery output (LBO pin)"""
+    global battery_low
+    
+    # PowerBoost LBO pin goes LOW when battery is low
+    # We use pull-up, so LOW = battery low, HIGH = battery OK
+    battery_low = not battery_low_pin.value
+    
+    return battery_low
+
+def update_performance_metrics():
+    """Update system performance metrics - simplified"""
+    global cpu_usage, memory_usage, avg_loop_time, max_loop_time, cpu_temp
+    
+    # CPU temperature from microcontroller
+    try:
+        cpu_temp = microcontroller.cpu.temperature
+    except:
+        cpu_temp = 25.0  # Default if temperature reading fails
+    
+    # Memory usage calculation
+    try:
+        gc.collect()  # Force garbage collection
+        total_memory = gc.mem_alloc() + gc.mem_free()
+        used_memory = gc.mem_alloc()
+        memory_usage = (used_memory / total_memory) * 100
+    except:
+        memory_usage = 50  # Default if calculation fails
+    
+    # Loop timing statistics
+    if loop_times:
+        avg_loop_time = sum(loop_times) / len(loop_times)
+        max_loop_time = max(loop_times)
+        
+        # Simple CPU usage estimate
+        cpu_usage = min(100, (avg_loop_time / 0.05) * 100)
+    else:
+        cpu_usage = 25  # Default estimate
+
+def get_system_warning():
+    """Get system performance warning message with battery status"""
+    warnings = []
+    warning_level = 0  # 0=normal, 1=caution, 2=danger, 3=critical
+    
+    # Check battery status FIRST (highest priority)
+    if battery_low:
+        warnings.append("BATTERY-CRITICAL")
+        warning_level = max(warning_level, 3)
+    
+    # Check CPU usage
+    if cpu_usage >= CPU_THRESHOLD_DANGER:
+        warnings.append("CPU-CRITICAL")
+        warning_level = max(warning_level, 2)
+    elif cpu_usage >= CPU_THRESHOLD_CAUTION:
+        warnings.append("CPU-HIGH")
+        warning_level = max(warning_level, 1)
+    
+    # Check memory usage
+    if memory_usage >= MEMORY_THRESHOLD_DANGER:
+        warnings.append("MEMORY-CRITICAL")
+        warning_level = max(warning_level, 2)
+    elif memory_usage >= MEMORY_THRESHOLD_CAUTION:
+        warnings.append("MEMORY-HIGH")
+        warning_level = max(warning_level, 1)
+    
+    # Check loop timing
+    if avg_loop_time >= LOOP_TIME_THRESHOLD_DANGER:
+        warnings.append("TIMING-CRITICAL")
+        warning_level = max(warning_level, 2)
+    elif avg_loop_time >= LOOP_TIME_THRESHOLD_CAUTION:
+        warnings.append("TIMING-SLOW")
+        warning_level = max(warning_level, 1)
+    
+    # Generate warning message with battery priority
+    if warning_level == 3:  # Critical - Battery low
+        message = "CRITICAL: BATTERY LOW - Save data and recharge immediately!"
+        color = 0x333333  # Very dark for critical battery
+    elif warning_level == 2:
+        if cpu_usage >= CPU_THRESHOLD_DANGER or avg_loop_time >= LOOP_TIME_THRESHOLD_DANGER:
+            message = "UPGRADE TO PICO 2 RECOMMENDED - Performance critical!"
+        else:
+            message = "CRITICAL: " + " | ".join(warnings) + " - Consider optimization"
+        color = 0x444444  # Dark for danger
+    elif warning_level == 1:
+        if cpu_usage >= CPU_THRESHOLD_CAUTION or memory_usage >= MEMORY_THRESHOLD_CAUTION:
+            message = "CAUTION: " + " | ".join(warnings) + " - Monitor performance"
+        else:
+            message = "PERFORMANCE: " + " | ".join(warnings) + " - Optimize if possible"
+        color = 0x888888  # Medium gray for caution
+    else:
+        message = "SYSTEM OPTIMAL - All systems nominal, battery OK"
+        color = 0xFFFFFF  # White for normal
+    
+    return message, color
+
+def create_text_line(text, y_pos, color=0xFFFFFF, x_center=True, scale=1):
+    """Helper function to create text lines with size control"""
+    text_area = label.Label(terminalio.FONT, text=text, color=color, scale=scale)
+    if x_center:
+        text_width = text_area.bounding_box[2]
+        x_pos = (128 - text_width) // 2
+    else:
+        x_pos = 2
+    
+    text_group = displayio.Group(x=x_pos, y=y_pos)
+    text_group.append(text_area)
+    return text_group
+
+def create_scrolling_text(text, y_pos, color=0xFFFFFF, width=128, scale=1):
+    """Create scrolling text for long messages with optional font scaling"""
+    text_area = label.Label(terminalio.FONT, text=text, color=color, scale=scale)
+    # Start text off-screen to the right
+    text_group = displayio.Group(x=width, y=y_pos)
+    text_group.append(text_area)
+    return text_group, text_area
+
+def get_co2_voc_warning(co2_level, voc_level):
+    """Get CO2 and VOC specific warning message"""
+    warnings = []
+    max_level = 0
+    
+    # Check CO2 (highest priority for cognitive effects)
+    if co2_level >= 5000:
+        warnings.append("CO2-CRITICAL")
+        max_level = max(max_level, 4)
+    elif co2_level >= 2000:
+        warnings.append("CO2-DANGER")
+        max_level = max(max_level, 3)
+    elif co2_level >= 1500:
+        warnings.append("CO2-WARNING")
+        max_level = max(max_level, 2)
+    elif co2_level >= 1000:
+        warnings.append("CO2-CAUTION")
+        max_level = max(max_level, 1)
+    
+    # Check VOC
+    if voc_level >= 5500:
+        warnings.append("VOC-CRITICAL")
+        max_level = max(max_level, 4)
+    elif voc_level >= 2200:
+        warnings.append("VOC-DANGER")
+        max_level = max(max_level, 3)
+    elif voc_level >= 1430:
+        warnings.append("VOC-WARNING")
+        max_level = max(max_level, 2)
+    elif voc_level >= 660:
+        warnings.append("VOC-CAUTION")
+        max_level = max(max_level, 1)
+    
+    # Return the most appropriate message
+    if max_level >= 4:
+        message = "CRITICAL: " + " | ".join(warnings) + " - EVACUATE IMMEDIATELY!"
+        color = 0x444444
+    elif max_level >= 3:
+        message = "DANGER: " + " | ".join(warnings) + " - Leave area in 5 minutes"
+        color = 0x666666
+    elif max_level >= 2:
+        message = "WARNING: " + " | ".join(warnings) + " - Address within 15 minutes"
+        color = 0x888888
+    elif max_level >= 1:
+        message = "CAUTION: " + " | ".join(warnings) + " - Monitor and improve ventilation"
+        color = 0xAAAAA
+    else:
+        message = "EXCELLENT: CO2 and VOC levels within optimal ranges"
+        color = 0xFFFFFF
+    
+    return message, color
+
+def get_temp_humidity_warning(temp_c, humidity_percent):
+    """Get Temperature and Humidity specific warning message"""
+    warnings = []
+    max_level = 0
+    
+    # Check Temperature
+    if temp_c >= 35 or temp_c < 16:
+        warnings.append("TEMP-CRITICAL")
+        max_level = max(max_level, 4)
+    elif temp_c >= 30 or temp_c < 18:
+        warnings.append("TEMP-DANGER")
+        max_level = max(max_level, 3)
+    elif temp_c >= 28 or temp_c < 20:
+        warnings.append("TEMP-WARNING")
+        max_level = max(max_level, 2)
+    elif temp_c > 26 or temp_c < 20:
+        warnings.append("TEMP-NOTICE")
+        max_level = max(max_level, 1)
+    
+    # Check Humidity
+    if humidity_percent >= 90 or humidity_percent < 20:
+        warnings.append("HUMID-CRITICAL")
+        max_level = max(max_level, 4)
+    elif humidity_percent >= 80 or humidity_percent < 30:
+        warnings.append("HUMID-DANGER")
+        max_level = max(max_level, 3)
+    elif humidity_percent >= 70 or humidity_percent < 40:
+        warnings.append("HUMID-WARNING")
+        max_level = max(max_level, 2)
+    elif humidity_percent > 60 or humidity_percent < 40:
+        warnings.append("HUMID-NOTICE")
+        max_level = max(max_level, 1)
+    
+    # Return the most appropriate message
+    if max_level >= 4:
+        message = "CRITICAL: " + " | ".join(warnings) + " - Immediate action required!"
+        color = 0x444444
+    elif max_level >= 3:
+        message = "DANGER: " + " | ".join(warnings) + " - Address within 30 minutes"
+        color = 0x666666
+    elif max_level >= 2:
+        message = "WARNING: " + " | ".join(warnings) + " - Consider climate adjustment"
+        color = 0x888888
+    elif max_level >= 1:
+        message = "NOTICE: " + " | ".join(warnings) + " - Monitor comfort conditions"
+        color = 0xAAAAA
+    else:
+        message = "COMFORTABLE: Temperature and humidity in ideal ranges"
+        color = 0xFFFFFF
+    
+    return message, color
+
+def get_light_warning(lux):
+    """Get enhanced light/UV warning message based on lux levels with UV Index estimation"""
+    # Rough UV Index estimation from lux (very approximate)
+    # TSL2591 measures visible light, not UV directly, but we can estimate
+    # Peak sun (50,000+ lux) typically corresponds to UV Index 8-11
+    # Bright sun (10,000+ lux) typically corresponds to UV Index 3-7
+    
+    if lux < 200:
+        return "DIM: Eye strain possible - increase lighting for tasks", 0xAAAAA
+    elif lux < 500:
+        return "NORMAL: Typical indoor lighting - no UV concerns", 0xFFFFFF
+    elif lux < 2000:
+        return "BRIGHT: Comfortable outdoor light - minimal UV protection needed", 0xCCCCCC
+    elif lux < 10000:
+        return "BRIGHT SUN: Apply SPF 30+ sunscreen - UV Index likely 3-5", 0xAAAAA
+    elif lux < 25000:
+        return "STRONG SUN: UV Index 6-7 - Apply SPF 30+ sunscreen, seek shade 11am-3pm", 0x888888
+    elif lux < 50000:
+        return "VERY BRIGHT: UV Index 8-10 - Reapply SPF 30+ every 2hrs, wear hat/sunglasses", 0x666666
+    else:
+        return "INTENSE SUN: UV Index 11+ EXTREME - Minimize exposure 10am-4pm, full protection!", 0x444444
+
+def get_weather_warning(pressure_hpa, trend, storm_risk, forecast):
+    """Get weather/storm warning message based on current conditions"""
+    if storm_risk == "SEVERE":
+        return f"SEVERE WEATHER: {forecast}", 0x333333
+    elif storm_risk == "HIGH":
+        return f"STORM WARNING: {forecast}", 0x555555
+    elif storm_risk == "MODERATE":
+        return f"WEATHER WATCH: {forecast}", 0x777777
+    elif storm_risk == "CLEARING" or storm_risk == "IMPROVING":
+        return f"IMPROVING: {forecast}", 0xAAAAA
+    elif storm_risk == "LOW":
+        return f"STABLE: {forecast}", 0xFFFFFF
+    else:
+        return f"MONITORING: {forecast}", 0x888888
+
+def get_radiation_warning(usv_h, radiation_ready):
+    """Get radiation warning message based on level and warmup status"""
+    if not radiation_ready:
+        warmup_remaining = int((RADIATION_WARMUP - (time.monotonic() - radiation_start_time)) / 60) + 1
+        return f"WARMING UP: Dose rate ready in {warmup_remaining} min - CPM only", 0x888888
+    
+    if usv_h < 0.5:
+        return "SAFE: Normal background radiation", 0xFFFFFF
+    elif usv_h < 5.0:
+        return "ELEVATED: Limit exposure to 30 min - elevated radiation", 0xAAAAA
+    else:
+        return "DANGER: Evacuate in 5 min - dangerous radiation level!", 0x666666
+
+def update_scrolling_text(text_group, text_area, scroll_offset):
+    """Update scrolling text position"""
+    text_width = text_area.bounding_box[2]
+    new_x = 128 - scroll_offset
+    
+    # Reset when text completely scrolls off left side
+    if new_x < -text_width:
+        new_x = 128
+        scroll_offset = 0
+    
+    text_group.x = new_x
+    return scroll_offset + SCROLL_SPEED  # Use configurable scroll speed
+
+def build_screen_1(display, CO2, VOC, timestamp_str):
+    """Build CO2 & VOC Air Quality Screen (only when screen changes)"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements with single pixel spacing between each line
+    splash.append(create_text_line("CO2 & VOC", 6, 0xFFFFFF))
+    splash.append(create_text_line(f"CO2:{CO2}ppm", 18, 0xCCCCCC, False))
+    splash.append(create_text_line(f"VOC:{VOC}ppb", 28, 0xCCCCCC, False))
+    
+    # Get CO2/VOC specific warning message
+    warning_msg, warning_color = get_co2_voc_warning(CO2, VOC)
+    
+    # Create scrolling warning
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 39, warning_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
+    
+    return splash
+
+def build_screen_2(display, temperature, humidity, timestamp_str):
+    """Build Temperature & Humidity Screen (only when screen changes)"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements with single pixel spacing between each line
+    splash.append(create_text_line("TEMP & HUMID", 6, 0xFFFFFF))
+    splash.append(create_text_line(f"TEMP:{temperature:.1f}C", 18, 0xCCCCCC, False))
+    splash.append(create_text_line(f"HUMID:{humidity:.1f}%", 28, 0xCCCCCC, False))
+    
+    # Get temperature/humidity specific warning message
+    warning_msg, warning_color = get_temp_humidity_warning(temperature, humidity)
+    
+    # Create scrolling warning
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
+    
+    return splash
+
+def build_screen_3(display, lux, timestamp_str):
+    """Build Light/UV Screen (only when screen changes)"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements with 2 pixel gap
+    splash.append(create_text_line("LIGHT & UV", 6, 0xFFFFFF))
+    
+    if lux >= 1000:
+        lux_text = f"LUX:{lux/1000:.1f}k"
+    else:
+        lux_text = f"LUX:{lux:.0f}"
+    splash.append(create_text_line(lux_text, 18, 0xCCCCCC, False))
+    
+    # Light condition with 2 pixel gap
+    if lux < 200:
+        condition = "LOW"
+    elif lux < 1000:
+        condition = "MOD"
+    elif lux < 10000:
+        condition = "BRIGHT"
+    elif lux < 50000:
+        condition = "V.BRIGHT"
+    else:
+        condition = "INTENSE"
+    
+    splash.append(create_text_line(f"LEVEL:{condition}", 28, 0xAAAAA, False))
+    
+    # Get warning message
+    warning_msg, warning_color = get_light_warning(lux)
+    
+    # Create scrolling warning
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 39, warning_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
+    
+    return splash
+
+def build_screen_4(display, pressure_hpa, altitude_m, pressure_trend, storm_risk, weather_forecast, timestamp_str):
+    """Build Weather/Storm Prediction Screen (NEW)"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements
+    splash.append(create_text_line("WEATHER", 6, 0xFFFFFF))
+    splash.append(create_text_line(f"PRESS:{pressure_hpa:.1f}hPa", 18, 0xCCCCCC, False))
+    splash.append(create_text_line(f"ALT:{altitude_m:.0f}m {pressure_trend}", 28, 0xCCCCCC, False))
+    
+    # Get weather warning message
+    warning_msg, warning_color = get_weather_warning(pressure_hpa, pressure_trend, storm_risk, weather_forecast)
+    
+    # Create scrolling warning
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 39, warning_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
+    
+    return splash
+
+def build_screen_5(display, cpm, uSv_h, timestamp_str, radiation_ready):
+    """Build Radiation Screen (only when screen changes)"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements with 2 pixel gap
+    splash.append(create_text_line("RADIATION", 6, 0xFFFFFF))
+    splash.append(create_text_line(f"CPM:{cpm}", 18, 0xCCCCCC, False))
+    
+    if radiation_ready:
+        splash.append(create_text_line(f"uSv/h:{uSv_h:.3f}", 28, 0xCCCCCC, False))
+    else:
+        splash.append(create_text_line("uSv/h:WARMING", 28, 0x888888, False))
+    
+    # Get warning message
+    warning_msg, warning_color = get_radiation_warning(uSv_h, radiation_ready)
+    
+    # Create scrolling warning - radiation warning moved down further
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 40, warning_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
+    
+    return splash
+
+def build_screen_6(display, timestamp_str):
+    """Build System Performance Screen (only when screen changes)"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements with 2 pixel gap
+    splash.append(create_text_line("SYSTEM", 6, 0xFFFFFF))
+    splash.append(create_text_line(f"CPU:{cpu_usage:.0f}% MEM:{memory_usage:.0f}%", 18, 0xCCCCCC, False))
+    splash.append(create_text_line(f"TEMP:{cpu_temp:.1f}C LOOP:{avg_loop_time*1000:.0f}ms", 28, 0xCCCCCC, False))
+    
+    # Get system warning message
+    warning_msg, warning_color = get_system_warning()
+    
+    # Create scrolling warning
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
+    
+    return splash
+
+def build_screen_7(display, CO2, VOC, temperature, humidity, lux, pressure_hpa, uSv_h, storm_risk, timestamp_str):
+    """Build Enhanced Summary Screen with weather data"""
+    global current_scroll_group, current_scroll_area
+    
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    # Static elements with single pixel spacing between each line
+    splash.append(create_text_line("SUMMARY", 6, 0xFFFFFF))
+    splash.append(create_text_line(f"CO2:{CO2} VOC:{VOC//10}", 16, 0xCCCCCC, False))
+    splash.append(create_text_line(f"T:{temperature:.1f}C H:{humidity:.0f}%", 25, 0xCCCCCC, False))
+    
+    if lux >= 1000:
+        lux_display = f"{lux/1000:.1f}k"
+    else:
+        lux_display = f"{lux:.0f}"
+    splash.append(create_text_line(f"P:{pressure_hpa:.0f} L:{lux_display} R:{uSv_h:.2f}", 35, 0xCCCCCC, False))
+    
+    # Overall status message with enhanced parameters including weather
+    alerts = []
+    if CO2 >= 2000:
+        alerts.append("CO2-DANGER")
+    elif CO2 >= 1000:
+        alerts.append("CO2-CAUTION")
+        
+    if VOC >= 2200:
+        alerts.append("VOC-DANGER")
+    elif VOC >= 660:
+        alerts.append("VOC-CAUTION")
+    
+    if temperature >= 30 or temperature < 18:
+        alerts.append("TEMP-WARNING")
+    elif temperature >= 28 or temperature < 20:
+        alerts.append("TEMP-NOTICE")
+        
+    if humidity >= 80 or humidity < 30:
+        alerts.append("HUMID-WARNING")
+    elif humidity >= 70 or humidity < 40:
+        alerts.append("HUMID-NOTICE")
+        
+    if uSv_h >= 5.0:
+        alerts.append("RAD-DANGER")
+    elif uSv_h >= 0.5:
+        alerts.append("RAD-ELEVATED")
+        
+    if lux >= 2000:
+        alerts.append("LIGHT-INTENSE")
+    elif lux >= 500:
+        alerts.append("LIGHT-BRIGHT")
+    
+    # Add weather alerts
+    if storm_risk == "SEVERE":
+        alerts.append("STORM-SEVERE")
+    elif storm_risk == "HIGH":
+        alerts.append("STORM-HIGH")
+    elif storm_risk == "MODERATE":
+        alerts.append("WEATHER-WATCH")
+    
+    if alerts:
+        status_msg = "ALERTS: " + " | ".join(alerts[:3])  # Limit to 3 alerts for space
+        status_color = 0x888888
+    else:
+        status_msg = "ALL SYSTEMS NORMAL - Environment within safe parameters"
+        status_color = 0xFFFFFF
+    
+    # Create scrolling status
+    current_scroll_group, current_scroll_area = create_scrolling_text(status_msg, 44, status_color, 128, 1)
+    splash.append(current_scroll_group)
+    
+    # Timestamp
+    splash.append(create_text_line(f"Time: {timestamp_str[-8:]}", 61, 0x666666, False))
+    
+    return splash
+
+def update_screen_data(screen_num, CO2, VOC, temperature, humidity, lux, pressure_hpa, altitude_m, pressure_trend, storm_risk, weather_forecast, cpm, uSv_h, timestamp_str, radiation_ready):
+    """Update dynamic data on current screen without rebuilding - Updated for 7 screens"""
+    global current_splash
+    
+    if not current_splash or len(current_splash) < 4:
+        return
+    
+    try:
+        # Update sensor data based on screen - updated for 7 screens
+        if screen_num == 0:  # CO2 & VOC: Title[0], CO2[1], VOC[2], Warning[3], Time[4]
+            current_splash[1][0].text = f"CO2:{CO2}ppm"
+            current_splash[2][0].text = f"VOC:{VOC}ppb"
+            current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on CO2/VOC
+            warning_msg, warning_color = get_co2_voc_warning(CO2, VOC)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+            
+        elif screen_num == 1:  # Temperature & Humidity: Title[0], TEMP[1], HUMID[2], Warning[3], Time[4]
+            current_splash[1][0].text = f"TEMP:{temperature:.1f}C"
+            current_splash[2][0].text = f"HUMID:{humidity:.1f}%"
+            current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on temp/humidity
+            warning_msg, warning_color = get_temp_humidity_warning(temperature, humidity)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+            
+        elif screen_num == 2:  # Light: Title[0], LUX[1], LEVEL[2], Warning[3], Time[4]
+            if lux >= 1000:
+                lux_text = f"LUX:{lux/1000:.1f}k"
+            else:
+                lux_text = f"LUX:{lux:.0f}"
+            current_splash[1][0].text = lux_text
+            
+            # Update light condition
+            if lux < 200:
+                condition = "LOW"
+            elif lux < 1000:
+                condition = "MOD"
+            elif lux < 10000:
+                condition = "BRIGHT"
+            elif lux < 50000:
+                condition = "V.BRIGHT"
+            else:
+                condition = "INTENSE"
+            current_splash[2][0].text = f"LEVEL:{condition}"
+            current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on current light levels
+            warning_msg, warning_color = get_light_warning(lux)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+            
+        elif screen_num == 3:  # Weather: Title[0], PRESS[1], ALT/TREND[2], Warning[3], Time[4]
+            current_splash[1][0].text = f"PRESS:{pressure_hpa:.1f}hPa"
+            current_splash[2][0].text = f"ALT:{altitude_m:.0f}m {pressure_trend}"
+            current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on current weather conditions
+            warning_msg, warning_color = get_weather_warning(pressure_hpa, pressure_trend, storm_risk, weather_forecast)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+                
+        elif screen_num == 4:  # Radiation: Title[0], CPM[1], uSv/h[2], Warning[3], Time[4]
+            current_splash[1][0].text = f"CPM:{cpm}"
+            if radiation_ready:
+                current_splash[2][0].text = f"uSv/h:{uSv_h:.3f}"
+            else:
+                current_splash[2][0].text = "uSv/h:WARMING"
+            current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on current radiation levels
+            warning_msg, warning_color = get_radiation_warning(uSv_h, radiation_ready)
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+                
+        elif screen_num == 5:  # System: Title[0], CPU/MEM[1], TEMP/LOOP[2], Warning[3], Time[4]
+            current_splash[1][0].text = f"CPU:{cpu_usage:.0f}% MEM:{memory_usage:.0f}%"
+            current_splash[2][0].text = f"TEMP:{cpu_temp:.1f}C LOOP:{avg_loop_time*1000:.0f}ms"
+            current_splash[4][0].text = f"Time: {timestamp_str}"
+            
+            # Update the warning message based on current system performance
+            warning_msg, warning_color = get_system_warning()
+            if current_scroll_area:
+                current_scroll_area.text = warning_msg
+                current_scroll_area.color = warning_color
+            
+        elif screen_num == 6:  # Summary: Title[0], CO2/VOC[1], TEMP/HUMID[2], PRESS/LUX/RAD[3], Warning[4], Time[5]
+            current_splash[1][0].text = f"CO2:{CO2} VOC:{VOC//10}"  # Divide VOC by 10 to fit
+            current_splash[2][0].text = f"T:{temperature:.1f}C H:{humidity:.0f}%"
+            if lux >= 1000:
+                lux_display = f"{lux/1000:.1f}k"
+            else:
+                lux_display = f"{lux:.0f}"
+            current_splash[3][0].text = f"P:{pressure_hpa:.0f} L:{lux_display} R:{uSv_h:.2f}"
+            current_splash[5][0].text = f"Time: {timestamp_str[-8:]}"
+            
+            # Update summary alerts with weather parameters
+            alerts = []
+            if CO2 >= 2000:
+                alerts.append("CO2-DANGER")
+            elif CO2 >= 1000:
+                alerts.append("CO2-CAUTION")
+                
+            if VOC >= 2200:
+                alerts.append("VOC-DANGER")
+            elif VOC >= 660:
+                alerts.append("VOC-CAUTION")
+            
+            if temperature >= 30 or temperature < 18:
+                alerts.append("TEMP-WARNING")
+            elif temperature >= 28 or temperature < 20:
+                alerts.append("TEMP-NOTICE")
+                
+            if humidity >= 80 or humidity < 30:
+                alerts.append("HUMID-WARNING")
+            elif humidity >= 70 or humidity < 40:
+                alerts.append("HUMID-NOTICE")
+                
+            if uSv_h >= 5.0:
+                alerts.append("RAD-DANGER")
+            elif uSv_h >= 0.5:
+                alerts.append("RAD-ELEVATED")
+                
+            if lux >= 2000:
+                alerts.append("LIGHT-INTENSE")
+            elif lux >= 500:
+                alerts.append("LIGHT-BRIGHT")
+            
+            # Add weather alerts
+            if storm_risk == "SEVERE":
+                alerts.append("STORM-SEVERE")
+            elif storm_risk == "HIGH":
+                alerts.append("STORM-HIGH")
+            elif storm_risk == "MODERATE":
+                alerts.append("WEATHER-WATCH")
+            
+            if alerts:
+                status_msg = "ALERTS: " + " | ".join(alerts[:3])  # Limit to 3 alerts for space
+                status_color = 0x888888
+            else:
+                status_msg = "ALL SYSTEMS NORMAL - Environment within safe parameters"
+                status_color = 0xFFFFFF
+                
+            if current_scroll_area:
+                current_scroll_area.text = status_msg
+                current_scroll_area.color = status_color
+            
+    except Exception as e:
+        print(f"⚠️ Display update error: {e}")
+        # If update fails, we'll rebuild on next screen change
+
+def display_startup_screen(display):
+    """Show startup screen"""
+    splash = displayio.Group()
+    display.root_group = splash
+    
+    splash.append(create_text_line("AI FIELD", 8, 0xFFFFFF, True, 1))
+    splash.append(create_text_line("ANALYZER", 20, 0xFFFFFF, True, 1))
+    splash.append(create_text_line("v1.7", 32, 0x888888))
+    splash.append(create_text_line("Weather + Storm", 44, 0x666666))
+    
+    # Show startup screen for 3 seconds before countdown
+    time.sleep(3)
+
+def sensor_startup_timer_with_init(display):
+    """Startup countdown with background initialization - Enhanced for BMP180/280"""
+    global scd41, tsl, bmp, CO2, VOC, temperature, humidity, lux, pressure_hpa, altitude_m, i2c
+    
+    start_time = time.monotonic()
+    last_second_shown = 10  # Start higher to trigger first update
+    init_step = 0
+    sensors_ok = False
+    
+    # Initialize default values
+    CO2, VOC, temperature, humidity = 400, 0, 25.0, 50.0
+    lux = 0
+    pressure_hpa = 1013.25
+    altitude_m = 0
+    
+    # Initialization steps to do during countdown
+    while True:
+        current_time = time.monotonic()
+        elapsed = current_time - start_time
+        
+        # Calculate remaining time and current second to show
+        remaining = STARTUP_COUNTDOWN - elapsed
+        current_second = int(remaining) + 1
+        
+        # Exit when countdown is complete
+        if remaining <= 0:
+            # Show first screen immediately when countdown ends
+            print("🚀 Countdown complete - starting main display")
+            break
+        
+        # Only update display when the second changes
+        if current_second != last_second_shown and current_second > 0:
+            if current_second >= 7:
+                status_msg = "Booting systems..."
+            elif current_second >= 6:
+                status_msg = "Initializing I2C..."
+            elif current_second >= 5:
+                status_msg = "Starting SCD41..."
+            elif current_second >= 4:
+                status_msg = "Setting up TSL2591..."
+            elif current_second >= 3:
+                status_msg = "Configuring BMP180..."
+            elif current_second >= 2:
+                status_msg = "Mounting SD Card..."
+            elif current_second >= 1:
+                status_msg = "Starting Geiger..."
+            else:
+                status_msg = "Going live!"
+                
+            splash = displayio.Group()
+            display.root_group = splash
+            
+            splash.append(create_text_line("AI FIELD", 6, 0xFFFFFF, True, 1))
+            splash.append(create_text_line("ANALYZER", 16, 0xFFFFFF, True, 1))
+            splash.append(create_text_line(f"Ready in {current_second}s", 28, 0x888888))
+            splash.append(create_text_line(status_msg, 40, 0x666666))
+            
+            last_second_shown = current_second
+            print(f"🕐 Countdown: {current_second} - {status_msg}")
+        
+        # Do initialization work during countdown
+        if init_step == 0 and elapsed >= 1.0:  # Start I2C setup at 7s remaining
+            print("🔧 Setting up I2C sensors...")
+            try:
+                i2c = busio.I2C(board.GP5, board.GP4)
+                print("✅ I2C bus initialized")
+                init_step = 1
+            except Exception as e:
+                print(f"❌ I2C bus error: {e}")
+                init_step = 1
+            
+        elif init_step == 1 and elapsed >= 2.0:  # SCD41 at 6s remaining
+            try:
+                scd41 = adafruit_scd4x.SCD4X(i2c)
+                scd41.start_periodic_measurement()
+                print("✅ SCD41 air quality sensor ready")
+                init_step = 2
+            except Exception as e:
+                print(f"❌ SCD41 error: {e}")
+                scd41 = None
+                init_step = 2
+                
+        elif init_step == 2 and elapsed >= 3.0:  # TSL2591 at 5s remaining
+            try:
+                tsl = adafruit_tsl2591.TSL2591(i2c)
+                tsl.gain = adafruit_tsl2591.GAIN_LOW
+                tsl.integration_time = adafruit_tsl2591.INTEGRATIONTIME_100MS
+                print("✅ TSL2591 light sensor ready")
+                init_step = 3
+            except Exception as e:
+                print(f"❌ TSL2591 error: {e}")
+                tsl = None
+                init_step = 3
+                
+        elif init_step == 3 and elapsed >= 4.0:  # BMP180 at 4s remaining
+            try:
+                bmp = SimpleBMP180(i2c)
+                # Take initial reading
+                pressure_hpa = bmp.pressure
+                altitude_m = bmp.altitude
+                sensors_ok = True
+                print(f"✅ BMP180 sensor ready - Initial: {pressure_hpa:.1f} hPa, {altitude_m:.0f}m")
+                init_step = 4
+            except Exception as e:
+                print(f"❌ BMP180 error: {e}")
+                bmp = None
+                init_step = 4
+                
+        elif init_step == 4 and elapsed >= 5.0:  # SD card at 3s remaining
+            print("💾 Setting up SD Card...")
+            if setup_sd_logging():
+                # Test SD card with startup message
+                try:
+                    with open(LOG_FILE, "a") as f:
+                        f.write("Weather + Storm Prediction Startup test\n")
+                        f.flush()
+                        # Try storage.sync() if available
+                        try:
+                            storage.sync()
+                        except:
+                            pass  # Ignore if sync not available
+                    print("✅ Startup SD logging test successful.")
+                except Exception as e:
+                    print(f"🚨 Startup SD logging test failed: {e}")
+            else:
+                print("🚨 Startup SD logging failed!")
+            init_step = 5
+                
+        elif init_step == 5 and elapsed >= 6.5:  # Final prep at 1.5s remaining
+            print("⚡ Initializing radiation detection...")
+            print("🔧 Starting performance monitoring...")
+            print("🔋 Enabling battery monitoring...")
+            print("🌪️ Initializing storm prediction...")
+            
+            # Take initial sensor readings
+            if sensors_ok and scd41 and tsl and bmp:
+                print("📊 Taking initial sensor readings...")
+                try:
+                    # SCD41 needs time to get data - check if data is ready
+                    if scd41.data_ready:
+                        CO2 = scd41.CO2
+                        temperature = scd41.temperature
+                        humidity = scd41.relative_humidity
+                        # Calculate VOC estimate based on CO2 (simple approximation)
+                        VOC = max(0, (CO2 - 400) * 2)  # Rough VOC estimate
+                        print(f"✅ Initial SCD41: CO2={CO2}, T={temperature:.1f}C, RH={humidity:.1f}%, VOC~{VOC}")
+                    else:
+                        print("⚠️ SCD41 data not ready yet - using defaults")
+                        CO2, temperature, humidity, VOC = 400, 25.0, 50.0, 0
+                except Exception as e:
+                    print(f"⚠️ Initial SCD41 read failed: {e}")
+                    CO2, temperature, humidity, VOC = 400, 25.0, 50.0, 0
+                
+                try:
+                    # Get initial light reading
+                    lux = tsl.lux
+                    if lux is None:
+                        lux = 120000
+                    print(f"✅ Initial light level: {lux:.0f} lux")
+                except Exception as e:
+                    print(f"⚠️ Initial light read failed: {e}")
+                    lux = 0
+                
+                try:
+                    # Get initial pressure reading and start history
+                    pressure_hpa = bmp.pressure
+                    altitude_m = bmp.altitude
+                    update_pressure_history(pressure_hpa)
+                    print(f"✅ Initial pressure: {pressure_hpa:.1f} hPa, altitude: {altitude_m:.0f}m")
+                except Exception as e:
+                    print(f"⚠️ Initial pressure read failed: {e}")
+                    pressure_hpa = 1013.25
+                    altitude_m = 0
+            
+            print("🎯 All systems ready!")
+            init_step = 6
+        
+        # Short delay
+        time.sleep(0.05)
+    
+    return sensors_ok, scd41, tsl, bmp
+
+def check_flashlight_button():
+    """Toggle flashlight when button is pressed with debounce logic"""
+    global flashlight_on, button_last_state, button_press_time
+    
+    current_time = time.monotonic()
+    current_button_state = button.value
+    
+    # Button pressed (goes from True to False due to pull-up)
+    if button_last_state and not current_button_state:
+        # Check if enough time has passed since last press (debounce)
+        if current_time - button_press_time > DEBOUNCE_DELAY:
+            flashlight_on = not flashlight_on
+            flashlight.value = flashlight_on
+            button_press_time = current_time
+            print(f"🔦 Flashlight {'ON' if flashlight_on else 'OFF'}")
+    
+    button_last_state = current_button_state
+
+# **Initialize Display**
+display = init_display()
+display_startup_screen(display)
+
+# **Hardware Setup**
+geiger_pin = board.GP7
+piezo_pin = board.GP20
+pulse_count = 0
+count_duration = 120  # 2 minutes
+alpha = 53.032
+last_pulse_time = 0
+cpm = 0
+uSv_h = 0.0
+
+# Geiger counter
+geiger_sensor = digitalio.DigitalInOut(geiger_pin)
+geiger_sensor.switch_to_input(pull=digitalio.Pull.UP)
+
+# Piezo buzzer
+piezo = digitalio.DigitalInOut(piezo_pin)
+piezo.switch_to_output()
+
+# Button and flashlight
+button = digitalio.DigitalInOut(board.GP3)
+button.switch_to_input(pull=digitalio.Pull.UP)
+flashlight = digitalio.DigitalInOut(board.GP2)
+flashlight.switch_to_output()
+flashlight.value = False  # Force OFF at startup
+
+# Low Battery Monitor from PowerBoost 1000C
+battery_low_pin = digitalio.DigitalInOut(board.GP0)
+battery_low_pin.switch_to_input(pull=digitalio.Pull.UP)
+
+# Flashlight state variables with debounce
+flashlight_on = False  # Start with flashlight OFF
+button_last_state = True
+button_press_time = 0
+
+# **I2C Sensors Setup & Startup Timer Combined - Enhanced with BMP180**
+print("🚀 Starting AI Field Analyzer v1.7 - Weather + Storm Prediction...")
+
+# Call startup function with proper global handling for all sensors
+sensors_ok, scd41, tsl, bmp = sensor_startup_timer_with_init(display)
+
+# Show first screen immediately after countdown with REAL data
+print("🎯 Transitioning to main display...")
+timestamp = time.localtime()
+timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+
+# Initialize performance metrics early so system screen has data
+update_performance_metrics()
+
+# Use the actual sensor values that were read during startup
+current_splash = build_screen_1(display, CO2, VOC, timestamp_str)
+
+# **Initialize Variables**
+air_quality_last_update = time.monotonic()
+light_last_update = time.monotonic()
+pressure_last_update = time.monotonic()
+pressure_history_update = time.monotonic()
+display_last_update = time.monotonic()
+screen_change_time = time.monotonic()
+data_update_time = time.monotonic()
+performance_update_time = time.monotonic()
+last_sd_write = time.monotonic()  # Initialize SD write timer
+radiation_start_time = time.monotonic()  # Track radiation warmup
+battery_check_time = time.monotonic()  # Track battery check timing
+current_screen = 0
+screens_total = 7  # Updated to 7 screens: CO2/VOC, Temp/Humid, Light, Weather, Radiation, System, Summary
+scroll_offsets = [0, 0, 0, 0, 0, 0, 0]  # Track scroll position for each screen
+current_scroll_group = None  # Keep track of scrolling text group
+current_scroll_area = None  # Keep track of scrolling text area
+previous_geiger_state = True  # Track previous geiger sensor state for edge detection
+
+# **Main Loop - OPTIMIZED FOR RADIATION DETECTION WITH WEATHER PREDICTION**
+start_time = time.monotonic()
+pulse_count = 0
+loop_start_time = time.monotonic()
+
+print("🚀 AI Field Analyzer v1.7 started with Weather + Storm Prediction!")
+
+while True:
+    # **Performance Monitoring - Minimal overhead**
+    loop_current_time = time.monotonic()
+    loop_time = loop_current_time - loop_start_time
+    
+    # Track loop times (keep only recent 20 measurements)
+    loop_times.append(loop_time)
+    if len(loop_times) > 20:
+        loop_times.pop(0)
+    
+    loop_start_time = loop_current_time
+    current_time = loop_current_time
+    
+    # **PRIORITY 1: RADIATION DETECTION - MAXIMUM PRIORITY, ENHANCED SENSITIVITY**
+    current_geiger_state = geiger_sensor.value
+    
+    # Detect pulse on falling edge with improved sensitivity
+    if previous_geiger_state and not current_geiger_state and current_time - last_pulse_time > 0.001:
+        pulse_count += 1
+        last_pulse_time = current_time
+        piezo.value = True
+        # Immediate piezo off for fastest response
+        piezo.value = False
+    
+    # Update previous state for next comparison
+    previous_geiger_state = current_geiger_state
+        
+    # Calculate CPM every 2 minutes
+    if current_time - start_time >= count_duration:
+        cpm = pulse_count
+        uSv_h = cpm / alpha
+        pulse_count = 0
+        start_time = current_time
+    
+    # **PRIORITY 2: Essential updates only - Reduced frequency**
+    
+    # Update Performance Metrics every 10 seconds
+    if current_time - performance_update_time >= 10:
+        update_performance_metrics()
+        performance_update_time = current_time
+    
+    # Check battery status every 60 seconds (1 minute)
+    if current_time - battery_check_time >= BATTERY_CHECK_INTERVAL:
+        check_battery_status()
+        battery_check_time = current_time
+    
+    # Flashlight Button Check
+    check_flashlight_button()
+    
+    # **PRIORITY 3: Sensor updates - Less frequent for better radiation sensitivity**
+    if sensors_ok and scd41 and tsl and bmp:
+        # SCD41 sensor update every 5 seconds
+        if current_time - air_quality_last_update >= 5:
+            try:
+                if scd41.data_ready:
+                    CO2 = scd41.CO2
+                    temperature = scd41.temperature
+                    humidity = scd41.relative_humidity
+                    # Calculate VOC estimate based on CO2 deviation from baseline
+                    VOC = max(0, int((CO2 - 400) * 1.5 + (humidity - 40) * 5))
+                air_quality_last_update = current_time
+            except:
+                pass
+        
+        # Light sensor update every 4 seconds
+        if current_time - light_last_update >= 4:
+            try:
+                lux = tsl.lux
+                if lux is None:
+                    lux = 120000
+                light_last_update = current_time
+            except:
+                pass
+        
+        # Pressure sensor update every 3 seconds (more frequent for weather monitoring)
+        if current_time - pressure_last_update >= 3:
+            try:
+                pressure_hpa = bmp.pressure
+                altitude_m = bmp.altitude
+                pressure_last_update = current_time
+            except:
+                pass
+        
+        # Pressure history update every 5 minutes for storm prediction
+        if current_time - pressure_history_update >= PRESSURE_HISTORY_INTERVAL:
+            update_pressure_history(pressure_hpa)
+            pressure_history_update = current_time
+    
+    # Check if radiation sensor is ready
+    radiation_ready = (current_time - radiation_start_time) >= RADIATION_WARMUP
+    
+    # **PRIORITY 4: Display updates - Even less frequent**
+    if current_time - data_update_time >= DATA_UPDATE_RATE:
+        timestamp = time.localtime()
+        timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        update_screen_data(current_screen, CO2, VOC, temperature, humidity, lux, pressure_hpa, altitude_m, pressure_trend, storm_risk, weather_forecast, cpm, uSv_h, timestamp_str, radiation_ready)
+        data_update_time = current_time
+    
+    # Screen changes
+    if current_time - screen_change_time >= SCREEN_DURATION:
+        current_screen = (current_screen + 1) % screens_total
+        screen_change_time = current_time
+        scroll_offsets[current_screen] = 0
+        
+        timestamp = time.localtime()
+        timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        
+        if current_screen == 0:
+            current_splash = build_screen_1(display, CO2, VOC, timestamp_str)
+        elif current_screen == 1:
+            current_splash = build_screen_2(display, temperature, humidity, timestamp_str)
+        elif current_screen == 2:
+            current_splash = build_screen_3(display, lux, timestamp_str)
+        elif current_screen == 3:
+            current_splash = build_screen_4(display, pressure_hpa, altitude_m, pressure_trend, storm_risk, weather_forecast, timestamp_str)
+        elif current_screen == 4:
+            current_splash = build_screen_5(display, cpm, uSv_h, timestamp_str, radiation_ready)
+        elif current_screen == 5:
+            current_splash = build_screen_6(display, timestamp_str)
+        elif current_screen == 6:
+            current_splash = build_screen_7(display, CO2, VOC, temperature, humidity, lux, pressure_hpa, uSv_h, storm_risk, timestamp_str)
+    
+    # Scrolling text updates
+    if current_time - display_last_update >= SCROLL_REFRESH and current_scroll_group and current_scroll_area:
+        scroll_offsets[current_screen] = update_scrolling_text(current_scroll_group, current_scroll_area, scroll_offsets[current_screen])
+        display_last_update = current_time
+        
+        # **Enhanced console output with weather data and storm prediction**
+        if int(current_time * 2) % 6 == 0:  # Every 3 seconds
+            full_timestamp = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+            rad_status = "READY" if radiation_ready else "WARMUP"
+            sd_status = "SD:OK" if sd_available else "SD:OFF"
+            
+            print(f"\r[{full_timestamp}] CO₂:{CO2} | VOC~{VOC} | T:{temperature:.1f}C | RH:{humidity:.1f}% | P:{pressure_hpa:.1f}hPa | ALT:{altitude_m:.0f}m | TREND:{pressure_trend} | STORM:{storm_risk} | Lux:{lux:.0f} | CPM:{cpm} | uSv/h:{uSv_h:.3f}({rad_status}) | CPU:{cpu_usage:.0f}% | TEMP:{cpu_temp:.1f}C | BAT:{'LOW' if battery_low else 'OK'} | {sd_status} | Screen:{current_screen+1}", end="")
+            
+            # **Enhanced SD logging with weather data every 30 seconds**
+            if current_time - last_sd_write >= SD_LOG_INTERVAL:
+                battery_status = "LOW" if battery_low else "OK"
+                if log_to_sd(full_timestamp, CO2, VOC, temperature, humidity, lux, pressure_hpa, altitude_m, pressure_trend, storm_risk, cpm, uSv_h, cpu_usage, memory_usage, avg_loop_time*1000, cpu_temp, battery_status):
+                    last_sd_write = current_time
+    
+    # **CRITICAL: NO SLEEP - Maximum radiation detection sensitivity**
+    # Removed all sleep() calls for fastest possible radiation pulse detection
