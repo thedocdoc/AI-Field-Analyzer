@@ -19,6 +19,7 @@ NEW in v1.6:
 - Temperature-based comfort zone warnings
 - Humidity-based health and comfort alerts
 - 6-screen rotation for focused parameter monitoring
+- PowerBoost 1000C low battery monitoring on GPIO 0
 
 Features:
 - Verbose safety warnings with actionable timing recommendations
@@ -31,6 +32,7 @@ Features:
 - Simple, reliable CSV logging to SD card
 - 6-screen rotating display: CO2/VOC, Temp/Humid, Light/UV, Radiation, System, Summary
 - Star Trek-style tricorder interface with smooth animations
+- Low battery warning from PowerBoost 1000C LBO pin
 
 Sensors:
 - Pocket Geiger Counter (radiation detection with CPM and µSv/h)
@@ -47,7 +49,7 @@ Hardware Platform:
 - Raspberry Pi Pico or Pico 2 (CircuitPython)
 - Custom pin configuration optimized for sensor integration
 - Built-in SD card logging with simple, reliable writes
-- Needs more testing
+- PowerBoost 1000C battery management with low battery detection
 """
 
 import time
@@ -75,6 +77,7 @@ STARTUP_COUNTDOWN = 8      # Startup countdown duration in seconds
 RADIATION_WARMUP = 120     # Radiation sensor warmup time in seconds
 DATA_UPDATE_RATE = 3       # Update sensor data every 3 seconds
 SD_LOG_INTERVAL = 30       # Write to SD every 30 seconds
+BATTERY_CHECK_INTERVAL = 60  # Check battery every 60 seconds (1 minute)
 
 # Performance monitoring thresholds
 CPU_THRESHOLD_CAUTION = 70  # CPU usage % for caution
@@ -95,6 +98,7 @@ CO2, temperature, humidity, VOC = 400, 25.0, 50.0, 0
 lux = 0
 sd_available = False
 LOG_FILE = None
+battery_low = False
 
 # **Performance Monitoring Variables**
 loop_times = []
@@ -123,9 +127,9 @@ def setup_sd_logging():
         formatted_date = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02}_{timestamp.tm_hour:02}-{timestamp.tm_min:02}-{timestamp.tm_sec:02}"
         LOG_FILE = f"/sd/field_data_{formatted_date}.csv"
 
-        # Create file & write header with new SCD41 fields
+        # Create file & write header with new SCD41 fields and battery status
         with open(LOG_FILE, "a") as f:
-            f.write("Timestamp,CO2_ppm,VOC_ppb,Temperature_C,Humidity_%,Lux,CPM,uSv/h,CPU_%,Memory_%,Loop_ms,CPU_Temp_C\n")
+            f.write("Timestamp,CO2_ppm,VOC_ppb,Temperature_C,Humidity_%,Lux,CPM,uSv/h,CPU_%,Memory_%,Loop_ms,CPU_Temp_C,Battery_Status\n")
         
         print(f"✅ SD logging to: {LOG_FILE}")
         return True
@@ -136,12 +140,12 @@ def setup_sd_logging():
         print("🚨 SD Card not found! Logging disabled.")
         return False
 
-def log_to_sd(timestamp, co2, voc, temp, humidity, lux, cpm, usv_h, cpu, memory, loop_ms, cpu_temp):
-    """Simple, fast SD logging with SCD41 data"""
+def log_to_sd(timestamp, co2, voc, temp, humidity, lux, cpm, usv_h, cpu, memory, loop_ms, cpu_temp, battery_status):
+    """Simple, fast SD logging with SCD41 data and battery status"""
     if sd_available and LOG_FILE:
         try:
             with open(LOG_FILE, "a") as f:
-                f.write(f"{timestamp},{co2},{voc},{temp:.1f},{humidity:.1f},{lux:.0f},{cpm},{usv_h:.3f},{cpu:.1f},{memory:.1f},{loop_ms:.1f},{cpu_temp:.1f}\n")
+                f.write(f"{timestamp},{co2},{voc},{temp:.1f},{humidity:.1f},{lux:.0f},{cpm},{usv_h:.3f},{cpu:.1f},{memory:.1f},{loop_ms:.1f},{cpu_temp:.1f},{battery_status}\n")
             return True
         except:
             print("❌ SD write failed")
@@ -178,6 +182,16 @@ def init_display():
     print("✅ Display ready!")
     return display
 
+def check_battery_status():
+    """Check PowerBoost 1000C low battery output (LBO pin)"""
+    global battery_low
+    
+    # PowerBoost LBO pin goes LOW when battery is low
+    # We use pull-up, so LOW = battery low, HIGH = battery OK
+    battery_low = not battery_low_pin.value
+    
+    return battery_low
+
 def update_performance_metrics():
     """Update system performance metrics - simplified"""
     global cpu_usage, memory_usage, avg_loop_time, max_loop_time, cpu_temp
@@ -208,9 +222,14 @@ def update_performance_metrics():
         cpu_usage = 25  # Default estimate
 
 def get_system_warning():
-    """Get system performance warning message"""
+    """Get system performance warning message with battery status"""
     warnings = []
-    warning_level = 0  # 0=normal, 1=caution, 2=danger
+    warning_level = 0  # 0=normal, 1=caution, 2=danger, 3=critical
+    
+    # Check battery status FIRST (highest priority)
+    if battery_low:
+        warnings.append("BATTERY-CRITICAL")
+        warning_level = max(warning_level, 3)
     
     # Check CPU usage
     if cpu_usage >= CPU_THRESHOLD_DANGER:
@@ -236,8 +255,11 @@ def get_system_warning():
         warnings.append("TIMING-SLOW")
         warning_level = max(warning_level, 1)
     
-    # Generate warning message
-    if warning_level == 2:
+    # Generate warning message with battery priority
+    if warning_level == 3:  # Critical - Battery low
+        message = "CRITICAL: BATTERY LOW - Save data and recharge immediately!"
+        color = 0x333333  # Very dark for critical battery
+    elif warning_level == 2:
         if cpu_usage >= CPU_THRESHOLD_DANGER or avg_loop_time >= LOOP_TIME_THRESHOLD_DANGER:
             message = "UPGRADE TO PICO 2 RECOMMENDED - Performance critical!"
         else:
@@ -250,7 +272,7 @@ def get_system_warning():
             message = "PERFORMANCE: " + " | ".join(warnings) + " - Optimize if possible"
         color = 0x888888  # Medium gray for caution
     else:
-        message = "SYSTEM OPTIMAL - Performance within normal parameters"
+        message = "SYSTEM OPTIMAL - All systems nominal, battery OK"
         color = 0xFFFFFF  # White for normal
     
     return message, color
@@ -444,11 +466,11 @@ def build_screen_1(display, CO2, VOC, timestamp_str):
     warning_msg, warning_color = get_co2_voc_warning(CO2, VOC)
     
     # Create scrolling warning
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color, 128, 1)
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 39, warning_color, 128, 1)
     splash.append(current_scroll_group)
     
     # Timestamp
-    splash.append(create_text_line(f"Time: {timestamp_str}", 61, 0x666666, False))
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
     
     return splash
 
@@ -472,7 +494,7 @@ def build_screen_2(display, temperature, humidity, timestamp_str):
     splash.append(current_scroll_group)
     
     # Timestamp
-    splash.append(create_text_line(f"Time: {timestamp_str}", 61, 0x666666, False))
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
     
     return splash
 
@@ -510,11 +532,11 @@ def build_screen_3(display, lux, timestamp_str):
     warning_msg, warning_color = get_light_warning(lux)
     
     # Create scrolling warning
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 35, warning_color, 128, 1)
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 39, warning_color, 128, 1)
     splash.append(current_scroll_group)
     
     # Timestamp
-    splash.append(create_text_line(f"Time: {timestamp_str}", 61, 0x666666, False))
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
     
     return splash
 
@@ -542,7 +564,7 @@ def build_screen_4(display, cpm, uSv_h, timestamp_str, radiation_ready):
     splash.append(current_scroll_group)
     
     # Timestamp
-    splash.append(create_text_line(f"Time: {timestamp_str}", 61, 0x666666, False))
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
     
     return splash
 
@@ -562,11 +584,11 @@ def build_screen_5(display, timestamp_str):
     warning_msg, warning_color = get_system_warning()
     
     # Create scrolling warning
-    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 35, warning_color, 128, 1)
+    current_scroll_group, current_scroll_area = create_scrolling_text(warning_msg, 38, warning_color, 128, 1)
     splash.append(current_scroll_group)
     
     # Timestamp
-    splash.append(create_text_line(f"Time: {timestamp_str}", 61, 0x666666, False))
+    splash.append(create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
     
     return splash
 
@@ -586,7 +608,7 @@ def build_screen_6(display, CO2, VOC, temperature, humidity, lux, uSv_h, timesta
         lux_display = f"{lux/1000:.1f}k"
     else:
         lux_display = f"{lux:.0f}"
-    splash.append(create_text_line(f"LUX:{lux_display} RAD:{uSv_h:.2f}", 34, 0xCCCCCC, False))
+    splash.append(create_text_line(f"LUX:{lux_display} RAD:{uSv_h:.2f}", 35, 0xCCCCCC, False))
     
     # Overall status message with enhanced parameters
     alerts = []
@@ -628,7 +650,7 @@ def build_screen_6(display, CO2, VOC, temperature, humidity, lux, uSv_h, timesta
         status_color = 0xFFFFFF
     
     # Create scrolling status
-    current_scroll_group, current_scroll_area = create_scrolling_text(status_msg, 41, status_color, 128, 1)
+    current_scroll_group, current_scroll_area = create_scrolling_text(status_msg, 44, status_color, 128, 1)
     splash.append(current_scroll_group)
     
     # Timestamp
@@ -784,7 +806,7 @@ def display_startup_screen(display):
     splash.append(create_text_line("AI FIELD", 8, 0xFFFFFF, True, 1))
     splash.append(create_text_line("ANALYZER", 20, 0xFFFFFF, True, 1))
     splash.append(create_text_line("v1.6", 32, 0x888888))
-    splash.append(create_text_line("SCD41 Upgrade", 44, 0x666666))
+    splash.append(create_text_line("SCD41 + Battery", 44, 0x666666))
     
     # Show startup screen for 3 seconds before countdown
     time.sleep(3)
@@ -889,7 +911,7 @@ def sensor_startup_timer_with_init(display):
                 # Test SD card with startup message
                 try:
                     with open(LOG_FILE, "a") as f:
-                        f.write("SCD41 Startup test\n")
+                        f.write("SCD41 + Battery Monitor Startup test\n")
                         f.flush()
                         # Try storage.sync() if available
                         try:
@@ -906,6 +928,7 @@ def sensor_startup_timer_with_init(display):
         elif init_step == 4 and elapsed >= 6.5:  # Final prep at 1.5s remaining
             print("⚡ Initializing radiation detection...")
             print("🔧 Starting performance monitoring...")
+            print("🔋 Enabling battery monitoring...")
             
             # Take initial sensor readings for SCD41
             if sensors_ok and scd41 and tsl:
@@ -991,13 +1014,17 @@ flashlight = digitalio.DigitalInOut(board.GP2)
 flashlight.switch_to_output()
 flashlight.value = False  # Force OFF at startup
 
+# Low Battery Monitor from PowerBoost 1000C
+battery_low_pin = digitalio.DigitalInOut(board.GP0)
+battery_low_pin.switch_to_input(pull=digitalio.Pull.UP)
+
 # Flashlight state variables with debounce
 flashlight_on = False  # Start with flashlight OFF
 button_last_state = True
 button_press_time = 0
 
 # **I2C Sensors Setup & Startup Timer Combined - SCD41 Version**
-print("🚀 Starting AI Field Analyzer v1.6 - SCD41 Upgrade...")
+print("🚀 Starting AI Field Analyzer v1.6 - SCD41 + Battery Monitor...")
 
 # Call startup function with proper global handling for SCD41
 sensors_ok, scd41, tsl = sensor_startup_timer_with_init(display)
@@ -1022,6 +1049,7 @@ data_update_time = time.monotonic()
 performance_update_time = time.monotonic()
 last_sd_write = time.monotonic()  # Initialize SD write timer
 radiation_start_time = time.monotonic()  # Track radiation warmup
+battery_check_time = time.monotonic()  # Track battery check timing
 current_screen = 0
 screens_total = 6  # Updated to 6 screens: CO2/VOC, Temp/Humid, Light, Radiation, System, Summary
 scroll_offsets = [0, 0, 0, 0, 0, 0]  # Track scroll position for each screen
@@ -1029,12 +1057,12 @@ current_scroll_group = None  # Keep track of scrolling text group
 current_scroll_area = None  # Keep track of scrolling text area
 previous_geiger_state = True  # Track previous geiger sensor state for edge detection
 
-# **Main Loop - OPTIMIZED FOR RADIATION DETECTION WITH SCD41**
+# **Main Loop - OPTIMIZED FOR RADIATION DETECTION WITH SCD41 + BATTERY MONITORING**
 start_time = time.monotonic()
 pulse_count = 0
 loop_start_time = time.monotonic()
 
-print("🚀 AI Field Analyzer v1.6 started with SCD41!")
+print("🚀 AI Field Analyzer v1.6 started with SCD41 + Battery Monitor!")
 
 while True:
     # **Performance Monitoring - Minimal overhead**
@@ -1076,6 +1104,11 @@ while True:
     if current_time - performance_update_time >= 10:
         update_performance_metrics()
         performance_update_time = current_time
+    
+    # Check battery status every 60 seconds (1 minute)
+    if current_time - battery_check_time >= BATTERY_CHECK_INTERVAL:
+        check_battery_status()
+        battery_check_time = current_time
     
     # Flashlight Button Check
     check_flashlight_button()
@@ -1143,17 +1176,18 @@ while True:
         scroll_offsets[current_screen] = update_scrolling_text(current_scroll_group, current_scroll_area, scroll_offsets[current_screen])
         display_last_update = current_time
         
-        # **Enhanced console output with SCD41 data and SD logging**
+        # **Enhanced console output with SCD41 data, battery status and SD logging**
         if int(current_time * 2) % 6 == 0:  # Every 3 seconds
             full_timestamp = f"{timestamp.tm_year}-{timestamp.tm_mon:02}-{timestamp.tm_mday:02} {timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
             rad_status = "READY" if radiation_ready else "WARMUP"
             sd_status = "SD:OK" if sd_available else "SD:OFF"
             
-            print(f"\r[{full_timestamp}] CO₂:{CO2} | VOC~{VOC} | T:{temperature:.1f}C | RH:{humidity:.1f}% | Lux:{lux:.0f} | CPM:{cpm} | uSv/h:{uSv_h:.3f}({rad_status}) | CPU:{cpu_usage:.0f}% | TEMP:{cpu_temp:.1f}C | {sd_status} | Screen:{current_screen+1}", end="")
+            print(f"\r[{full_timestamp}] CO₂:{CO2} | VOC~{VOC} | T:{temperature:.1f}C | RH:{humidity:.1f}% | Lux:{lux:.0f} | CPM:{cpm} | uSv/h:{uSv_h:.3f}({rad_status}) | CPU:{cpu_usage:.0f}% | TEMP:{cpu_temp:.1f}C | BAT:{'LOW' if battery_low else 'OK'} | {sd_status} | Screen:{current_screen+1}", end="")
             
-            # **Enhanced SD logging with SCD41 data every 30 seconds**
+            # **Enhanced SD logging with SCD41 data and battery status every 30 seconds**
             if current_time - last_sd_write >= SD_LOG_INTERVAL:
-                if log_to_sd(full_timestamp, CO2, VOC, temperature, humidity, lux, cpm, uSv_h, cpu_usage, memory_usage, avg_loop_time*1000, cpu_temp):
+                battery_status = "LOW" if battery_low else "OK"
+                if log_to_sd(full_timestamp, CO2, VOC, temperature, humidity, lux, cpm, uSv_h, cpu_usage, memory_usage, avg_loop_time*1000, cpu_temp, battery_status):
                     last_sd_write = current_time
     
     # **CRITICAL: NO SLEEP - Maximum radiation detection sensitivity**
