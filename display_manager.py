@@ -1,15 +1,8 @@
 """
-AI Field Analyzer v1.8 - Display Manager
-----------------------------------------
-Manages the SSD1325 OLED display and all screen rendering.
-Designed for easy extension with menus and navigation.
-
-Features:
-- 7-screen rotation with sensor data
-- Scrolling warning messages with color coding
-- Smart warning generation based on sensor thresholds
-- Extensible architecture for future menu system
-- Optimized for SSD1325 128x64 4-bit grayscale display
+AI Field Analyzer v1.9 - Fixed Display Manager
+----------------------------------------------
+Fixed scrolling and screen hanging issues.
+Enhanced with location awareness and weather intelligence.
 
 © 2025 Apollo Timbers. MIT License.
 """
@@ -31,21 +24,18 @@ DATA_UPDATE_RATE = 3       # Screen data update interval
 SCROLL_REFRESH = 1.0 / SCROLL_FPS
 
 class DisplayManager:
-    """
-    Manages the SSD1325 OLED display and all screen rendering.
-    Handles sensor data display, warning messages, and future menu system.
-    """
+    """Enhanced display manager with location-aware layouts and weather intelligence"""
     
     def __init__(self):
         # Display hardware
         self.display = None
         
-        # Screen management
+        # Enhanced screen management (now 8 screens)
         self.current_screen = 0
-        self.screens_total = 7  # CO2/VOC, Temp/Humid, Light, Weather, Radiation, System, Summary
+        self.screens_total = 8
         self.screen_names = [
             "CO2 & VOC", "TEMP & HUMID", "LIGHT & UV", "WEATHER", 
-            "RADIATION", "SYSTEM", "SUMMARY"
+            "RADIATION", "SYSTEM", "SUMMARY", "LOCATION"
         ]
         
         # Display state
@@ -53,18 +43,14 @@ class DisplayManager:
         self.current_scroll_group = None
         self.current_scroll_area = None
         self.scroll_offsets = [0] * self.screens_total
+        self.scroll_text_width = 0  # Track text width for proper scrolling
         
         # Timing
         self.screen_change_time = 0
         self.display_last_update = 0
         self.data_update_time = 0
         
-        # Future menu system variables
-        self.menu_mode = False
-        self.menu_selection = 0
-        self.menu_items = []
-        
-        print("🖥️ Display Manager initialized")
+        print("🖥️ Enhanced Display Manager initialized")
     
     def initialize_display(self):
         """Initialize the SSD1325 OLED display"""
@@ -77,9 +63,9 @@ class DisplayManager:
             spi = busio.SPI(clock=board.GP14, MOSI=board.GP15)
             
             # Display pins
-            oled_cs = board.GP10   # Chip Select
-            oled_dc = board.GP11   # Data/Command
-            oled_rst = board.GP12  # Reset
+            oled_cs = board.GP10
+            oled_dc = board.GP11
+            oled_rst = board.GP12
             
             # Create display bus
             display_bus = FourWire(
@@ -92,7 +78,7 @@ class DisplayManager:
             
             # Initialize display
             self.display = adafruit_ssd1325.SSD1325(display_bus, width=128, height=64)
-            print("✅ Display ready!")
+            print("✅ Enhanced display ready!")
             return True
             
         except Exception as e:
@@ -100,7 +86,7 @@ class DisplayManager:
             return False
     
     def create_text_line(self, text, y_pos, color=0xFFFFFF, x_center=True, scale=1):
-        """Helper function to create text lines with positioning and scaling"""
+        """Helper function to create text lines"""
         text_area = label.Label(terminalio.FONT, text=text, color=color, scale=scale)
         if x_center:
             text_width = text_area.bounding_box[2]
@@ -113,319 +99,360 @@ class DisplayManager:
         return text_group
     
     def create_scrolling_text(self, text, y_pos, color=0xFFFFFF, width=128, scale=1):
-        """Create scrolling text for long warning messages"""
+        """Create scrolling text - MINIMAL FIX for text width"""
         text_area = label.Label(terminalio.FONT, text=text, color=color, scale=scale)
-        # Start text off-screen to the right
         text_group = displayio.Group(x=width, y=y_pos)
         text_group.append(text_area)
+    
+        # FIXED: More robust text width calculation
+        try:
+            if text_area.bounding_box and text_area.bounding_box[2] and text_area.bounding_box[2] > 0:
+                self.scroll_text_width = text_area.bounding_box[2]
+            else:
+                self.scroll_text_width = len(str(text)) * 6 * scale
+        except:
+            self.scroll_text_width = len(str(text)) * 6 * scale
+    
         return text_group, text_area
     
     def update_scrolling_text(self, text_group, text_area, scroll_offset):
-        """Update scrolling text position with wraparound"""
-        text_width = text_area.bounding_box[2]
-        new_x = 128 - scroll_offset
+        """Update scrolling text position - MINIMAL FIX"""
+        try:
+            # Use stored width first, then fallback calculations
+            if hasattr(self, 'scroll_text_width') and self.scroll_text_width > 0:
+                text_width = self.scroll_text_width
+            else:
+                try:
+                    if text_area.bounding_box and text_area.bounding_box[2] and text_area.bounding_box[2] > 0:
+                        text_width = text_area.bounding_box[2]
+                    else:
+                        raise ValueError("Invalid bounding box")
+                except:
+                    text_width = len(str(text_area.text)) * 6
         
-        # Reset when text completely scrolls off left side
-        if new_x < -text_width:
-            new_x = 128
-            scroll_offset = 0
+            # Calculate new position
+            new_x = 128 - scroll_offset
         
-        text_group.x = new_x
-        return scroll_offset + SCROLL_SPEED
-    
-    # =================================================================
-    # WARNING MESSAGE GENERATION
-    # =================================================================
-    
-    def get_co2_voc_warning(self, co2, voc):
-        """Generate CO2 and VOC specific warning messages"""
-        warnings = []
-        max_level = 0
+            # Reset scroll when text completely moves off screen
+            if new_x < -text_width - 10:
+                scroll_offset = 0
+                new_x = 128
         
-        # Check CO2 levels (highest priority for cognitive effects)
-        if co2 >= 5000:
-            warnings.append("CO2-CRITICAL")
-            max_level = max(max_level, 4)
-        elif co2 >= 2000:
-            warnings.append("CO2-DANGER")
-            max_level = max(max_level, 3)
-        elif co2 >= 1500:
-            warnings.append("CO2-WARNING")
-            max_level = max(max_level, 2)
-        elif co2 >= 1000:
-            warnings.append("CO2-CAUTION")
-            max_level = max(max_level, 1)
+            text_group.x = new_x
+            return scroll_offset + SCROLL_SPEED
         
-        # Check VOC levels
-        if voc >= 5500:
-            warnings.append("VOC-CRITICAL")
-            max_level = max(max_level, 4)
-        elif voc >= 2200:
-            warnings.append("VOC-DANGER")
-            max_level = max(max_level, 3)
-        elif voc >= 1430:
-            warnings.append("VOC-WARNING")
-            max_level = max(max_level, 2)
-        elif voc >= 660:
-            warnings.append("VOC-CAUTION")
-            max_level = max(max_level, 1)
+        except Exception as e:
+            print(f"Scroll error: {e}")
+            return 0
+    def get_enhanced_weather_warning(self, sensor_data):
+        """Enhanced weather warnings using new data"""
+        current_location = sensor_data.get('current_location', 'UNKNOWN')
+        weather_type = sensor_data.get('weather_forecast_type', 'UNKNOWN')
+        weather_confidence = sensor_data.get('weather_confidence', 0)
+        fog_risk = sensor_data.get('fog_risk', 'UNKNOWN')
         
-        # Generate appropriate message and color
-        if max_level >= 4:
-            message = "CRITICAL: " + " | ".join(warnings) + " - EVACUATE IMMEDIATELY!"
-            color = 0x444444
-        elif max_level >= 3:
-            message = "DANGER: " + " | ".join(warnings) + " - Leave area in 5 minutes"
-            color = 0x666666
-        elif max_level >= 2:
-            message = "WARNING: " + " | ".join(warnings) + " - Address within 15 minutes"
-            color = 0x888888
-        elif max_level >= 1:
-            message = "CAUTION: " + " | ".join(warnings) + " - Monitor and improve ventilation"
-            color = 0xAAAAA
+        if current_location != "OUTDOOR":
+            return f"Weather monitoring paused - {current_location.lower()} environment", 0x888888
+        if fog_risk == "CONFIRMED":
+            return f"FOG PRESENT: <500m visibility confirmed", 0x333333
+        elif fog_risk == "FORMING":
+            return f"FOG FORMING: Visibility reducing, conditions developing", 0x444444
+        elif weather_type == "DENSE_FOG" or fog_risk == "IMMINENT":
+            return f"FOG IMMINENT: Conditions perfect, visibility dropping", 0x444444
+        elif fog_risk == "POSSIBLE":
+            return f"FOG POSSIBLE: Low light + humidity detected", 0x666666
+        elif weather_type == "CLEAR":
+            return f"CLEAR CONDITIONS: Weather stable ({weather_confidence}%)", 0xFFFFFF
         else:
-            message = "EXCELLENT: CO2 and VOC levels within optimal ranges"
-            color = 0xFFFFFF
-        
-        return message, color
+            return f"MONITORING: Clean outdoor data ({weather_confidence}%)", 0xCCCCCC
     
-    def get_temp_humidity_warning(self, temp, humidity):
-        """Generate temperature and humidity warning messages"""
-        warnings = []
-        max_level = 0
+    def get_location_warning(self, sensor_data):
+        """Location and GPS warnings"""
+        current_location = sensor_data.get('current_location', 'UNKNOWN')
+        location_confidence = sensor_data.get('location_confidence', 0)
+        gps_satellites = sensor_data.get('gps_satellites', 0)
+        gps_speed = sensor_data.get('gps_speed_kmh', 0)
         
-        # Check temperature
-        if temp >= 35 or temp < 16:
-            warnings.append("TEMP-CRITICAL")
-            max_level = max(max_level, 4)
-        elif temp >= 30 or temp < 18:
-            warnings.append("TEMP-DANGER")
-            max_level = max(max_level, 3)
-        elif temp >= 28 or temp < 20:
-            warnings.append("TEMP-WARNING")
-            max_level = max(max_level, 2)
-        elif temp > 26 or temp < 20:
-            warnings.append("TEMP-NOTICE")
-            max_level = max(max_level, 1)
-        
-        # Check humidity
-        if humidity >= 90 or humidity < 20:
-            warnings.append("HUMID-CRITICAL")
-            max_level = max(max_level, 4)
-        elif humidity >= 80 or humidity < 30:
-            warnings.append("HUMID-DANGER")
-            max_level = max(max_level, 3)
-        elif humidity >= 70 or humidity < 40:
-            warnings.append("HUMID-WARNING")
-            max_level = max(max_level, 2)
-        elif humidity > 60 or humidity < 40:
-            warnings.append("HUMID-NOTICE")
-            max_level = max(max_level, 1)
-        
-        # Generate message
-        if max_level >= 4:
-            message = "CRITICAL: " + " | ".join(warnings) + " - Immediate action required!"
-            color = 0x444444
-        elif max_level >= 3:
-            message = "DANGER: " + " | ".join(warnings) + " - Address within 30 minutes"
-            color = 0x666666
-        elif max_level >= 2:
-            message = "WARNING: " + " | ".join(warnings) + " - Consider climate adjustment"
-            color = 0x888888
-        elif max_level >= 1:
-            message = "NOTICE: " + " | ".join(warnings) + " - Monitor comfort conditions"
-            color = 0xAAAAA
+        if current_location == "VEHICLE" and gps_speed > 50:
+            return f"HIGH SPEED: {gps_speed:.0f} km/h - Monitor conditions", 0x666666
+        elif current_location == "OUTDOOR" and gps_satellites >= 8:
+            return f"GPS EXCELLENT: {gps_satellites} satellites - High precision", 0xFFFFFF
+        elif current_location == "INDOOR":
+            return f"INDOOR DETECTED: Air quality monitoring active", 0x888888
+        elif current_location == "CAVE":
+            return f"UNDERGROUND: Safety monitoring prioritized", 0x666666
         else:
-            message = "COMFORTABLE: Temperature and humidity in ideal ranges"
-            color = 0xFFFFFF
-        
-        return message, color
-    
-    def get_light_warning(self, lux):
-        """Generate light/UV warning messages with UV index estimation"""
-        if lux < 200:
-            return "DIM: Eye strain possible - increase lighting for tasks", 0xAAAAA
-        elif lux < 500:
-            return "NORMAL: Typical indoor lighting - no UV concerns", 0xFFFFFF
-        elif lux < 2000:
-            return "BRIGHT: Comfortable outdoor light - minimal UV protection needed", 0xCCCCCC
-        elif lux < 10000:
-            return "BRIGHT SUN: Apply SPF 30+ sunscreen - UV Index likely 3-5", 0xAAAAA
-        elif lux < 25000:
-            return "STRONG SUN: UV Index 6-7 - Apply SPF 30+, seek shade 11am-3pm", 0x888888
-        elif lux < 50000:
-            return "VERY BRIGHT: UV Index 8-10 - Reapply SPF 30+ every 2hrs, wear hat/sunglasses", 0x666666
-        else:
-            return "INTENSE SUN: UV Index 11+ EXTREME - Minimize exposure 10am-4pm, full protection!", 0x444444
-    
-    def get_weather_warning(self, pressure, trend, storm_risk, forecast):
-        """Generate weather/storm warning messages"""
-        if storm_risk == "SEVERE":
-            return f"SEVERE WEATHER: {forecast}", 0x333333
-        elif storm_risk == "HIGH":
-            return f"STORM WARNING: {forecast}", 0x555555
-        elif storm_risk == "MODERATE":
-            return f"WEATHER WATCH: {forecast}", 0x777777
-        elif storm_risk in ["CLEARING", "IMPROVING"]:
-            return f"IMPROVING: {forecast}", 0xAAAAA
-        elif storm_risk == "LOW":
-            return f"STABLE: {forecast}", 0xFFFFFF
-        else:
-            return f"MONITORING: {forecast}", 0x888888
-    
-    def get_radiation_warning(self, usv_h, radiation_ready):
-        """Generate radiation warning messages"""
-        if not radiation_ready:
-            return "WARMING UP: Dose rate ready soon - CPM only", 0x888888
-        elif usv_h < 0.5:
-            return "SAFE: Normal background radiation", 0xFFFFFF
-        elif usv_h < 5.0:
-            return "ELEVATED: Limit exposure to 30 min - elevated radiation", 0xAAAAA
-        else:
-            return "DANGER: Evacuate in 5 min - dangerous radiation level!", 0x666666
+            return f"LOCATION: {current_location} ({location_confidence}%)", 0xAAAAA
     
     def get_system_warning(self, sensor_data):
-        """Generate system performance warning messages"""
+        """System warnings with power management"""
         warnings = []
         warning_level = 0
         
-        # Check battery status FIRST (highest priority)
-        if sensor_data['battery_low']:
+        battery_usage = sensor_data.get('battery_usage_estimate', 100)
+        current_location = sensor_data.get('current_location', 'UNKNOWN')
+        
+        if sensor_data.get('battery_low', False):
             warnings.append("BATTERY-CRITICAL")
-            warning_level = max(warning_level, 3)
-        
-        # Check CPU usage
-        if sensor_data['cpu_usage'] >= 85:
+            warning_level = 3
+        elif sensor_data.get('cpu_usage', 0) >= 85:
             warnings.append("CPU-CRITICAL")
-            warning_level = max(warning_level, 2)
-        elif sensor_data['cpu_usage'] >= 70:
-            warnings.append("CPU-HIGH")
-            warning_level = max(warning_level, 1)
+            warning_level = 2
+        elif battery_usage <= 70:
+            power_savings = 100 - battery_usage
+            warnings.append(f"POWER-SAVE-{power_savings}%")
+            warning_level = 1
         
-        # Check memory usage
-        if sensor_data['memory_usage'] >= 90:
-            warnings.append("MEMORY-CRITICAL")
-            warning_level = max(warning_level, 2)
-        elif sensor_data['memory_usage'] >= 80:
-            warnings.append("MEMORY-HIGH")
-            warning_level = max(warning_level, 1)
-        
-        # Check loop timing
-        if sensor_data['avg_loop_time'] >= 0.25:
-            warnings.append("TIMING-CRITICAL")
-            warning_level = max(warning_level, 2)
-        elif sensor_data['avg_loop_time'] >= 0.15:
-            warnings.append("TIMING-SLOW")
-            warning_level = max(warning_level, 1)
-        
-        # Generate warning message
-        if warning_level == 3:  # Critical - Battery low
-            message = "CRITICAL: BATTERY LOW - Save data and recharge immediately!"
-            color = 0x333333
+        if warning_level == 3:
+            return "CRITICAL: BATTERY LOW - Recharge immediately!", 0x333333
         elif warning_level == 2:
-            if sensor_data['cpu_usage'] >= 85 or sensor_data['avg_loop_time'] >= 0.25:
-                message = "UPGRADE TO PICO 2 RECOMMENDED - Performance critical!"
-            else:
-                message = "CRITICAL: " + " | ".join(warnings) + " - Consider optimization"
-            color = 0x444444
+            return "PERFORMANCE: High CPU usage - Monitor system", 0x444444
         elif warning_level == 1:
-            message = "CAUTION: " + " | ".join(warnings) + " - Monitor performance"
-            color = 0x888888
+            power_savings = 100 - battery_usage
+            return f"POWER SAVE: {current_location} mode - {power_savings}% savings", 0xAAAAA
         else:
-            message = "SYSTEM OPTIMAL - All systems nominal, battery OK"
-            color = 0xFFFFFF
+            return f"SYSTEM OPTIMAL: {current_location} mode - All systems nominal", 0xFFFFFF
+    
+    def build_screen(self, screen_num, sensor_data, timestamp_str):
+        """Build screen with enhanced data - FIXED VERSION"""
+        # Clear any existing display groups to prevent hanging
+        if self.display and self.display.root_group:
+            try:
+                self.display.root_group = displayio.Group()
+            except Exception as e:
+                print(f"Warning: Could not clear display group: {e}")
         
-        return message, color
+        splash = displayio.Group()
+        
+        # Reset scroll offset for this screen
+        self.scroll_offsets[screen_num] = 0
+        
+        try:
+            if screen_num == 0:  # CO2 & VOC
+                splash.append(self.create_text_line("CO2 & VOC", 6, 0xFFFFFF))
+                splash.append(self.create_text_line(f"CO2:{sensor_data['co2']}ppm", 18, 0xCCCCCC, False))
+                splash.append(self.create_text_line(f"VOC:{sensor_data['voc']}ppb", 28, 0xCCCCCC, False))
+                warning_msg, warning_color = self.get_co2_warning(sensor_data['co2'])
+                
+            elif screen_num == 1:  # Temperature & Humidity
+                splash.append(self.create_text_line("TEMP & HUMID", 6, 0xFFFFFF))
+                splash.append(self.create_text_line(f"TEMP:{sensor_data['temperature']:.1f}C", 18, 0xCCCCCC, False))
+                splash.append(self.create_text_line(f"HUMID:{sensor_data['humidity']:.1f}%", 28, 0xCCCCCC, False))
+                
+                # Add dew point if available
+                if 'dew_point' in sensor_data and sensor_data['dew_point'] != 0:
+                    splash.append(self.create_text_line(f"DEW:{sensor_data['dew_point']:.1f}C", 38, 0xAAAAA, False))
+                
+                warning_msg, warning_color = self.get_temp_warning(sensor_data['temperature'])
+                
+            elif screen_num == 2:  # Light
+                splash.append(self.create_text_line("LIGHT & UV", 6, 0xFFFFFF))
+                lux_text = f"LUX:{sensor_data['lux']/1000:.1f}k" if sensor_data['lux'] >= 1000 else f"LUX:{sensor_data['lux']:.0f}"
+                splash.append(self.create_text_line(lux_text, 18, 0xCCCCCC, False))
+                
+                if sensor_data['lux'] < 200: condition = "LOW"
+                elif sensor_data['lux'] < 1000: condition = "MOD"
+                elif sensor_data['lux'] < 10000: condition = "BRIGHT"
+                else: condition = "INTENSE"
+                
+                splash.append(self.create_text_line(f"LEVEL:{condition}", 28, 0xAAAAA, False))
+                warning_msg, warning_color = self.get_light_warning(sensor_data['lux'])
+                
+            elif screen_num == 3:  # Enhanced Weather
+                splash.append(self.create_text_line("WEATHER", 6, 0xFFFFFF))
+                
+                current_location = sensor_data.get('current_location', 'UNKNOWN')
+                if current_location == "OUTDOOR":
+                    splash.append(self.create_text_line(f"PRESS:{sensor_data['pressure_hpa']:.1f}hPa", 18, 0xCCCCCC, False))
+                    weather_type = sensor_data.get('weather_forecast_type', 'UNKNOWN')
+                    weather_conf = sensor_data.get('weather_confidence', 0)
+                    splash.append(self.create_text_line(f"{weather_type}:{weather_conf}%", 28, 0xCCCCCC, False))
+                    fog_risk = sensor_data.get('fog_risk', 'UNKNOWN')
+                    splash.append(self.create_text_line(f"FOG:{fog_risk}", 38, 0xAAAAA, False))
+                else:
+                    splash.append(self.create_text_line(f"LOCATION:{current_location}", 18, 0x888888, False))
+                    splash.append(self.create_text_line("Weather monitoring", 28, 0x888888, False))
+                    splash.append(self.create_text_line("paused indoors", 38, 0x888888, False))
+                
+                warning_msg, warning_color = self.get_enhanced_weather_warning(sensor_data)
+                
+            elif screen_num == 4:  # Radiation
+                splash.append(self.create_text_line("RADIATION", 6, 0xFFFFFF))
+                splash.append(self.create_text_line(f"CPM:{sensor_data['cpm']}", 18, 0xCCCCCC, False))
+                if sensor_data['radiation_ready']:
+                    splash.append(self.create_text_line(f"uSv/h:{sensor_data['usv_h']:.3f}", 28, 0xCCCCCC, False))
+                else:
+                    splash.append(self.create_text_line("uSv/h:WARMING", 28, 0x888888, False))
+                warning_msg, warning_color = self.get_radiation_warning(sensor_data['usv_h'], sensor_data['radiation_ready'])
+                
+            elif screen_num == 5:  # Enhanced System
+                splash.append(self.create_text_line("SYSTEM", 6, 0xFFFFFF))
+                splash.append(self.create_text_line(f"CPU:{sensor_data['cpu_usage']:.0f}% MEM:{sensor_data['memory_usage']:.0f}%", 18, 0xCCCCCC, False))
+                battery_usage = sensor_data.get('battery_usage_estimate', 100)
+                current_location = sensor_data.get('current_location', 'UNKNOWN')
+                splash.append(self.create_text_line(f"PWR:{battery_usage}% {current_location[:3]}", 28, 0xCCCCCC, False))
+                warning_msg, warning_color = self.get_system_warning(sensor_data)
+                
+            elif screen_num == 6:  # Enhanced Summary
+                splash.append(self.create_text_line("SUMMARY", 6, 0xFFFFFF))
+                splash.append(self.create_text_line(f"CO2:{sensor_data['co2']} VOC:{sensor_data['voc']//10}", 16, 0xCCCCCC, False))
+                splash.append(self.create_text_line(f"T:{sensor_data['temperature']:.1f}C H:{sensor_data['humidity']:.0f}%", 25, 0xCCCCCC, False))
+                
+                location = sensor_data.get('current_location', 'UNK')[:3]
+                weather = sensor_data.get('weather_forecast_type', 'UNK')[:4]
+                battery = sensor_data.get('battery_usage_estimate', 100)
+                splash.append(self.create_text_line(f"LOC:{location} WX:{weather} B:{battery}%", 35, 0xCCCCCC, False))
+                warning_msg, warning_color = self.get_summary_warning(sensor_data)
+                
+            elif screen_num == 7:  # NEW: Location & GPS
+                splash.append(self.create_text_line("LOCATION & GPS", 6, 0xFFFFFF))
+                
+                current_location = sensor_data.get('current_location', 'UNKNOWN')
+                location_confidence = sensor_data.get('location_confidence', 0)
+                splash.append(self.create_text_line(f"LOC:{current_location}", 18, 0xCCCCCC, False))
+                splash.append(self.create_text_line(f"CONF:{location_confidence}%", 28, 0xCCCCCC, False))
+                
+                gps_satellites = sensor_data.get('gps_satellites', 0)
+                gps_speed = sensor_data.get('gps_speed_kmh', 0)
+                
+                if current_location == "VEHICLE":
+                    splash.append(self.create_text_line(f"SPEED:{gps_speed:.0f}km/h", 38, 0xAAAAA, False))
+                else:
+                    gps_quality = sensor_data.get('gps_quality', 'UNKNOWN')
+                    splash.append(self.create_text_line(f"GPS:{gps_satellites}sat {gps_quality[:3]}", 38, 0xAAAAA, False))
+                
+                warning_msg, warning_color = self.get_location_warning(sensor_data)
+            
+            # Add scrolling warning message
+            self.current_scroll_group, self.current_scroll_area = self.create_scrolling_text(warning_msg, 49, warning_color)
+            splash.append(self.current_scroll_group)
+            
+            # Add enhanced timestamp with location
+            location_indicator = sensor_data.get('current_location', 'UNK')[:3]
+            enhanced_timestamp = f"{timestamp_str} {location_indicator}"
+            splash.append(self.create_text_line(enhanced_timestamp, 60, 0x666666, False))
+            
+            # Set the display root group
+            if self.display:
+                self.display.root_group = splash
+            
+            self.current_splash = splash
+            return splash
+            
+        except Exception as e:
+            print(f"❌ Error building screen {screen_num}: {e}")
+            # Create a simple error screen
+            error_splash = displayio.Group()
+            error_splash.append(self.create_text_line(f"SCREEN {screen_num} ERROR", 20, 0x666666))
+            error_splash.append(self.create_text_line("Check sensor data", 32, 0x888888))
+            if self.display:
+                self.display.root_group = error_splash
+            return error_splash
+    
+    def get_co2_warning(self, co2):
+        """Basic CO2 warning"""
+        if co2 >= 2000:
+            return f"CO2 DANGER: {co2}ppm - Ventilate immediately", 0x666666
+        elif co2 >= 1000:
+            return f"CO2 CAUTION: {co2}ppm - Improve ventilation", 0xAAAAA
+        else:
+            return f"CO2 NORMAL: {co2}ppm - Air quality good", 0xFFFFFF
+    
+    def get_temp_warning(self, temp):
+        """Basic temperature warning"""
+        if temp >= 30 or temp < 18:
+            return f"TEMP WARNING: {temp:.1f}C - Uncomfortable", 0x888888
+        else:
+            return f"TEMP COMFORTABLE: {temp:.1f}C - Good", 0xFFFFFF
+    
+    def get_light_warning(self, lux):
+        """Basic light warning"""
+        if lux < 200:
+            return f"LIGHT LOW: {lux:.0f} lux - Eye strain possible", 0xAAAAA
+        elif lux > 50000:
+            return f"LIGHT INTENSE: {lux/1000:.1f}k lux - UV protection", 0x666666
+        else:
+            return f"LIGHT GOOD: {lux:.0f} lux - Comfortable", 0xFFFFFF
+    
+    def get_radiation_warning(self, usv_h, radiation_ready):
+        """Basic radiation warning"""
+        if not radiation_ready:
+            return "RADIATION: Warming up - ready soon", 0x888888
+        elif usv_h < 0.5:
+            return f"RADIATION SAFE: {usv_h:.3f} µSv/h - Normal", 0xFFFFFF
+        else:
+            return f"RADIATION ELEVATED: {usv_h:.3f} µSv/h - Limit exposure", 0xAAAAA
     
     def get_summary_warning(self, sensor_data):
-        """Generate comprehensive summary warning messages"""
+        """Enhanced summary warning"""
         alerts = []
+        current_location = sensor_data.get('current_location', 'UNKNOWN')
         
-        # Air quality alerts
-        if sensor_data['co2'] >= 2000:
-            alerts.append("CO2-DANGER")
-        elif sensor_data['co2'] >= 1000:
-            alerts.append("CO2-CAUTION")
+        if sensor_data['co2'] >= 1000:
+            alerts.append("CO2-HIGH")
         
-        if sensor_data['voc'] >= 2200:
-            alerts.append("VOC-DANGER")
-        elif sensor_data['voc'] >= 660:
-            alerts.append("VOC-CAUTION")
+        fog_risk = sensor_data.get('fog_risk', 'UNKNOWN')
+        if fog_risk in ["IMMINENT", "HIGH"]:
+            alerts.append(f"FOG-{fog_risk}")
         
-        # Climate alerts
-        if sensor_data['temperature'] >= 30 or sensor_data['temperature'] < 18:
-            alerts.append("TEMP-WARNING")
-        elif sensor_data['temperature'] >= 28 or sensor_data['temperature'] < 20:
-            alerts.append("TEMP-NOTICE")
-        
-        if sensor_data['humidity'] >= 80 or sensor_data['humidity'] < 30:
-            alerts.append("HUMID-WARNING")
-        elif sensor_data['humidity'] >= 70 or sensor_data['humidity'] < 40:
-            alerts.append("HUMID-NOTICE")
-        
-        # Radiation alerts
-        if sensor_data['usv_h'] >= 5.0:
-            alerts.append("RAD-DANGER")
-        elif sensor_data['usv_h'] >= 0.5:
-            alerts.append("RAD-ELEVATED")
-        
-        # Light alerts
-        if sensor_data['lux'] >= 50000:
-            alerts.append("LIGHT-EXTREME")
-        elif sensor_data['lux'] >= 25000:
-            alerts.append("LIGHT-INTENSE")
-        
-        # Weather alerts
-        if sensor_data['storm_risk'] == "SEVERE":
-            alerts.append("STORM-SEVERE")
-        elif sensor_data['storm_risk'] == "HIGH":
-            alerts.append("STORM-HIGH")
-        elif sensor_data['storm_risk'] == "MODERATE":
-            alerts.append("WEATHER-WATCH")
-        
-        # System alerts
-        if sensor_data['battery_low']:
+        if sensor_data.get('battery_low', False):
             alerts.append("BATTERY-LOW")
         
-        if sensor_data['cpu_usage'] >= 85:
-            alerts.append("SYSTEM-CRITICAL")
-        
-        # Generate message
         if alerts:
-            status_msg = "ALERTS: " + " | ".join(alerts[:3])  # Limit to 3 alerts for space
+            status_msg = f"{current_location}: " + " | ".join(alerts[:2])
             status_color = 0x888888
         else:
-            status_msg = "ALL SYSTEMS NORMAL - Environment within safe parameters"
+            battery_usage = sensor_data.get('battery_usage_estimate', 100)
+            power_savings = 100 - battery_usage
+            if power_savings > 0:
+                status_msg = f"{current_location} MODE: {power_savings}% power savings"
+            else:
+                status_msg = f"{current_location} MODE: All systems optimal"
             status_color = 0xFFFFFF
         
         return status_msg, status_color
     
-    def get_warning_message(self, screen_type, sensor_data):
-        """Get appropriate warning message for each screen type"""
-        if screen_type == "co2_voc":
-            return self.get_co2_voc_warning(sensor_data['co2'], sensor_data['voc'])
-        elif screen_type == "temp_humid":
-            return self.get_temp_humidity_warning(sensor_data['temperature'], sensor_data['humidity'])
-        elif screen_type == "light":
-            return self.get_light_warning(sensor_data['lux'])
-        elif screen_type == "weather":
-            return self.get_weather_warning(sensor_data['pressure_hpa'], sensor_data['pressure_trend'], 
-                                          sensor_data['storm_risk'], sensor_data['weather_forecast'])
-        elif screen_type == "radiation":
-            return self.get_radiation_warning(sensor_data['usv_h'], sensor_data['radiation_ready'])
-        elif screen_type == "system":
-            return self.get_system_warning(sensor_data)
-        elif screen_type == "summary":
-            return self.get_summary_warning(sensor_data)
-        else:
-            return "MONITORING: All systems operational", 0xFFFFFF
-    
-    # =================================================================
-    # STARTUP AND SPECIAL SCREENS
-    # =================================================================
+    def update_display(self, sensor_data, force_rebuild=False):
+        """Main display update function - FIXED VERSION"""
+        if not self.display:
+            return
+            
+        current_time = time.monotonic()
+        timestamp = time.localtime()
+        timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
+        
+        # Check for screen change
+        if current_time - self.screen_change_time >= SCREEN_DURATION:
+            self.current_screen = (self.current_screen + 1) % self.screens_total
+            self.screen_change_time = current_time
+            self.scroll_offsets[self.current_screen] = 0
+            force_rebuild = True
+            print(f"🔄 Screen: {self.screen_names[self.current_screen]} ({self.current_screen + 1}/{self.screens_total})")
+        
+        # Rebuild screen if needed
+        if force_rebuild or self.current_splash is None:
+            try:
+                self.build_screen(self.current_screen, sensor_data, timestamp_str)
+            except Exception as e:
+                print(f"❌ Error updating display: {e}")
+                return
+        
+        # Update scrolling text with proper error handling
+        if (current_time - self.display_last_update >= SCROLL_REFRESH and 
+            self.current_scroll_group and self.current_scroll_area):
+            try:
+                self.scroll_offsets[self.current_screen] = self.update_scrolling_text(
+                    self.current_scroll_group, self.current_scroll_area, 
+                    self.scroll_offsets[self.current_screen]
+                )
+                self.display_last_update = current_time
+            except Exception as e:
+                print(f"Warning: Scrolling text update failed: {e}")
+                # Reset scrolling on error
+                self.scroll_offsets[self.current_screen] = 0
     
     def display_startup_screen(self):
-        """Show startup screen with version info"""
+        """Enhanced startup screen"""
         if not self.display:
             return
             
@@ -434,13 +461,13 @@ class DisplayManager:
         
         splash.append(self.create_text_line("AI FIELD", 8, 0xFFFFFF, True, 1))
         splash.append(self.create_text_line("ANALYZER", 20, 0xFFFFFF, True, 1))
-        splash.append(self.create_text_line("v1.8", 32, 0x888888))
-        splash.append(self.create_text_line("Weather + Storm", 44, 0x666666))
+        splash.append(self.create_text_line("v1.9", 32, 0x888888))
+        splash.append(self.create_text_line("GPS + Weather Enhanced", 44, 0x666666))
         
         time.sleep(3)
     
     def display_countdown(self, seconds_remaining, status_message):
-        """Show countdown with status during sensor initialization"""
+        """Enhanced countdown screen"""
         if not self.display:
             return
             
@@ -448,270 +475,13 @@ class DisplayManager:
         self.display.root_group = splash
         
         splash.append(self.create_text_line("AI FIELD", 6, 0xFFFFFF, True, 1))
-        splash.append(self.create_text_line("ANALYZER", 16, 0xFFFFFF, True, 1))
+        splash.append(self.create_text_line("ANALYZER v1.9", 16, 0xFFFFFF, True, 1))
         splash.append(self.create_text_line(f"Ready in {seconds_remaining}s", 28, 0x888888))
-        splash.append(self.create_text_line(status_message, 40, 0x666666))
-    
-    # =================================================================
-    # MAIN SENSOR SCREENS
-    # =================================================================
-    
-    def build_screen(self, screen_num, sensor_data, timestamp_str):
-        """Build the specified screen with current sensor data"""
-        splash = displayio.Group()
-        self.display.root_group = splash
-        
-        if screen_num == 0:  # CO2 & VOC Screen
-            splash.append(self.create_text_line("CO2 & VOC", 6, 0xFFFFFF))
-            splash.append(self.create_text_line(f"CO2:{sensor_data['co2']}ppm", 18, 0xCCCCCC, False))
-            splash.append(self.create_text_line(f"VOC:{sensor_data['voc']}ppb", 28, 0xCCCCCC, False))
-            warning_msg, warning_color = self.get_warning_message("co2_voc", sensor_data)
-            
-        elif screen_num == 1:  # Temperature & Humidity Screen
-            splash.append(self.create_text_line("TEMP & HUMID", 6, 0xFFFFFF))
-            splash.append(self.create_text_line(f"TEMP:{sensor_data['temperature']:.1f}C", 18, 0xCCCCCC, False))
-            splash.append(self.create_text_line(f"HUMID:{sensor_data['humidity']:.1f}%", 28, 0xCCCCCC, False))
-            warning_msg, warning_color = self.get_warning_message("temp_humid", sensor_data)
-            
-        elif screen_num == 2:  # Light/UV Screen
-            splash.append(self.create_text_line("LIGHT & UV", 6, 0xFFFFFF))
-            lux_text = f"LUX:{sensor_data['lux']/1000:.1f}k" if sensor_data['lux'] >= 1000 else f"LUX:{sensor_data['lux']:.0f}"
-            splash.append(self.create_text_line(lux_text, 18, 0xCCCCCC, False))
-            
-            # Light condition indicator
-            if sensor_data['lux'] < 200: condition = "LOW"
-            elif sensor_data['lux'] < 1000: condition = "MOD"
-            elif sensor_data['lux'] < 10000: condition = "BRIGHT"
-            elif sensor_data['lux'] < 50000: condition = "V.BRIGHT"
-            else: condition = "INTENSE"
-            
-            splash.append(self.create_text_line(f"LEVEL:{condition}", 28, 0xAAAAA, False))
-            warning_msg, warning_color = self.get_warning_message("light", sensor_data)
-            
-        elif screen_num == 3:  # Weather/Storm Screen
-            splash.append(self.create_text_line("WEATHER", 6, 0xFFFFFF))
-            splash.append(self.create_text_line(f"PRESS:{sensor_data['pressure_hpa']:.1f}hPa", 18, 0xCCCCCC, False))
-            splash.append(self.create_text_line(f"ALT:{sensor_data['altitude_m']:.0f}m {sensor_data['pressure_trend']}", 28, 0xCCCCCC, False))
-            warning_msg, warning_color = self.get_warning_message("weather", sensor_data)
-            
-        elif screen_num == 4:  # Radiation Screen
-            splash.append(self.create_text_line("RADIATION", 6, 0xFFFFFF))
-            splash.append(self.create_text_line(f"CPM:{sensor_data['cpm']}", 18, 0xCCCCCC, False))
-            if sensor_data['radiation_ready']:
-                splash.append(self.create_text_line(f"uSv/h:{sensor_data['usv_h']:.3f}", 28, 0xCCCCCC, False))
-            else:
-                splash.append(self.create_text_line("uSv/h:WARMING", 28, 0x888888, False))
-            warning_msg, warning_color = self.get_warning_message("radiation", sensor_data)
-            
-        elif screen_num == 5:  # System Performance Screen
-            splash.append(self.create_text_line("SYSTEM", 6, 0xFFFFFF))
-            splash.append(self.create_text_line(f"CPU:{sensor_data['cpu_usage']:.0f}% MEM:{sensor_data['memory_usage']:.0f}%", 18, 0xCCCCCC, False))
-            splash.append(self.create_text_line(f"TEMP:{sensor_data['cpu_temp']:.1f}C LOOP:{sensor_data['avg_loop_time']*1000:.0f}ms", 28, 0xCCCCCC, False))
-            warning_msg, warning_color = self.get_warning_message("system", sensor_data)
-            
-        elif screen_num == 6:  # Summary Screen
-            splash.append(self.create_text_line("SUMMARY", 6, 0xFFFFFF))
-            splash.append(self.create_text_line(f"CO2:{sensor_data['co2']} VOC:{sensor_data['voc']//10}", 16, 0xCCCCCC, False))
-            splash.append(self.create_text_line(f"T:{sensor_data['temperature']:.1f}C H:{sensor_data['humidity']:.0f}%", 25, 0xCCCCCC, False))
-            
-            lux_display = f"{sensor_data['lux']/1000:.1f}k" if sensor_data['lux'] >= 1000 else f"{sensor_data['lux']:.0f}"
-            splash.append(self.create_text_line(f"P:{sensor_data['pressure_hpa']:.0f} L:{lux_display} R:{sensor_data['usv_h']:.2f}", 35, 0xCCCCCC, False))
-            warning_msg, warning_color = self.get_warning_message("summary", sensor_data)
-        
-        # Add scrolling warning message
-        self.current_scroll_group, self.current_scroll_area = self.create_scrolling_text(warning_msg, 39, warning_color)
-        splash.append(self.current_scroll_group)
-        
-        # Add timestamp
-        splash.append(self.create_text_line(f"Time: {timestamp_str}", 60, 0x666666, False))
-        
-        self.current_splash = splash
-        return splash
-    
-    def update_screen_data(self, sensor_data, timestamp_str):
-        """Update dynamic data on current screen without rebuilding"""
-        if not self.current_splash or len(self.current_splash) < 4:
-            return
-        
-        try:
-            # Update based on current screen
-            if self.current_screen == 0:  # CO2 & VOC
-                self.current_splash[1][0].text = f"CO2:{sensor_data['co2']}ppm"
-                self.current_splash[2][0].text = f"VOC:{sensor_data['voc']}ppb"
-                warning_msg, warning_color = self.get_warning_message("co2_voc", sensor_data)
-                
-            elif self.current_screen == 1:  # Temperature & Humidity
-                self.current_splash[1][0].text = f"TEMP:{sensor_data['temperature']:.1f}C"
-                self.current_splash[2][0].text = f"HUMID:{sensor_data['humidity']:.1f}%"
-                warning_msg, warning_color = self.get_warning_message("temp_humid", sensor_data)
-                
-            elif self.current_screen == 2:  # Light
-                lux_text = f"LUX:{sensor_data['lux']/1000:.1f}k" if sensor_data['lux'] >= 1000 else f"LUX:{sensor_data['lux']:.0f}"
-                self.current_splash[1][0].text = lux_text
-                
-                # Update light condition
-                if sensor_data['lux'] < 200: condition = "LOW"
-                elif sensor_data['lux'] < 1000: condition = "MOD"
-                elif sensor_data['lux'] < 10000: condition = "BRIGHT"
-                elif sensor_data['lux'] < 50000: condition = "V.BRIGHT"
-                else: condition = "INTENSE"
-                self.current_splash[2][0].text = f"LEVEL:{condition}"
-                warning_msg, warning_color = self.get_warning_message("light", sensor_data)
-                
-            elif self.current_screen == 3:  # Weather
-                self.current_splash[1][0].text = f"PRESS:{sensor_data['pressure_hpa']:.1f}hPa"
-                self.current_splash[2][0].text = f"ALT:{sensor_data['altitude_m']:.0f}m {sensor_data['pressure_trend']}"
-                warning_msg, warning_color = self.get_warning_message("weather", sensor_data)
-                
-            elif self.current_screen == 4:  # Radiation
-                self.current_splash[1][0].text = f"CPM:{sensor_data['cpm']}"
-                if sensor_data['radiation_ready']:
-                    self.current_splash[2][0].text = f"uSv/h:{sensor_data['usv_h']:.3f}"
-                else:
-                    self.current_splash[2][0].text = "uSv/h:WARMING"
-                warning_msg, warning_color = self.get_warning_message("radiation", sensor_data)
-                
-            elif self.current_screen == 5:  # System
-                self.current_splash[1][0].text = f"CPU:{sensor_data['cpu_usage']:.0f}% MEM:{sensor_data['memory_usage']:.0f}%"
-                self.current_splash[2][0].text = f"TEMP:{sensor_data['cpu_temp']:.1f}C LOOP:{sensor_data['avg_loop_time']*1000:.0f}ms"
-                warning_msg, warning_color = self.get_warning_message("system", sensor_data)
-                
-            elif self.current_screen == 6:  # Summary
-                self.current_splash[1][0].text = f"CO2:{sensor_data['co2']} VOC:{sensor_data['voc']//10}"
-                self.current_splash[2][0].text = f"T:{sensor_data['temperature']:.1f}C H:{sensor_data['humidity']:.0f}%"
-                lux_display = f"{sensor_data['lux']/1000:.1f}k" if sensor_data['lux'] >= 1000 else f"{sensor_data['lux']:.0f}"
-                self.current_splash[3][0].text = f"P:{sensor_data['pressure_hpa']:.0f} L:{lux_display} R:{sensor_data['usv_h']:.2f}"
-                warning_msg, warning_color = self.get_warning_message("summary", sensor_data)
-            
-            # Update timestamp (always last element)
-            if len(self.current_splash) > 4:
-                self.current_splash[-1][0].text = f"Time: {timestamp_str}"
-            
-            # Update warning message
-            if self.current_scroll_area:
-                self.current_scroll_area.text = warning_msg
-                self.current_scroll_area.color = warning_color
-                
-        except Exception as e:
-            print(f"⚠️ Display update error: {e}")
-    
-    # =================================================================
-    # MAIN DISPLAY UPDATE LOGIC
-    # =================================================================
-    
-    def update_display(self, sensor_data, force_rebuild=False):
-        """Main display update function - handles screen rotation and updates"""
-        current_time = time.monotonic()
-        timestamp = time.localtime()
-        timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
-        
-        # Check for screen change (automatic rotation)
-        if current_time - self.screen_change_time >= SCREEN_DURATION:
-            self.current_screen = (self.current_screen + 1) % self.screens_total
-            self.screen_change_time = current_time
-            self.scroll_offsets[self.current_screen] = 0  # Reset scroll for new screen
-            force_rebuild = True
-            print(f"🔄 Screen change: {self.screen_names[self.current_screen]} ({self.current_screen + 1}/{self.screens_total})")
-        
-        # Rebuild screen if needed (screen change or forced)
-        if force_rebuild:
-            self.build_screen(self.current_screen, sensor_data, timestamp_str)
-        
-        # Update screen data periodically without rebuilding
-        elif current_time - self.data_update_time >= DATA_UPDATE_RATE:
-            self.update_screen_data(sensor_data, timestamp_str)
-            self.data_update_time = current_time
-        
-        # Update scrolling text animation
-        if (current_time - self.display_last_update >= SCROLL_REFRESH and 
-            self.current_scroll_group and self.current_scroll_area):
-            self.scroll_offsets[self.current_screen] = self.update_scrolling_text(
-                self.current_scroll_group, self.current_scroll_area, 
-                self.scroll_offsets[self.current_screen]
-            )
-            self.display_last_update = current_time
-    
-    # =================================================================
-    # FUTURE MENU SYSTEM (PLACEHOLDER)
-    # =================================================================
-    
-    def enter_menu_mode(self):
-        """Enter menu mode (future implementation)"""
-        self.menu_mode = True
-        self.menu_selection = 0
-        self.menu_items = [
-            "Settings",
-            "Calibration", 
-            "Data Export",
-            "Diagnostics",
-            "About",
-            "Exit Menu"
-        ]
-        print("📋 Menu mode activated")
-        # TODO: Implement menu display
-    
-    def exit_menu_mode(self):
-        """Exit menu mode and return to sensor display"""
-        self.menu_mode = False
-        self.menu_selection = 0
-        self.menu_items = []
-        print("📊 Returning to sensor display")
-        # Force screen rebuild when exiting menu
-        return True  # Signal to force rebuild
-    
-    def navigate_menu(self, direction):
-        """Navigate menu selection (future implementation)"""
-        if not self.menu_mode:
-            return
-            
-        if direction == "up":
-            self.menu_selection = (self.menu_selection - 1) % len(self.menu_items)
-        elif direction == "down":
-            self.menu_selection = (self.menu_selection + 1) % len(self.menu_items)
-        
-        print(f"📋 Menu: {self.menu_items[self.menu_selection]}")
-        # TODO: Update menu display
-    
-    def select_menu_item(self):
-        """Select current menu item (future implementation)"""
-        if not self.menu_mode:
-            return
-            
-        selected_item = self.menu_items[self.menu_selection]
-        print(f"📋 Selected: {selected_item}")
-        
-        # TODO: Implement menu actions
-        if selected_item == "Exit Menu":
-            return self.exit_menu_mode()
-        
-        return False
-    
-    # =================================================================
-    # DISPLAY UTILITIES AND STATUS
-    # =================================================================
-    
-    def force_screen_change(self, screen_number):
-        """Manually change to a specific screen"""
-        if 0 <= screen_number < self.screens_total:
-            self.current_screen = screen_number
-            self.screen_change_time = time.monotonic()
-            self.scroll_offsets[self.current_screen] = 0
-            print(f"🔄 Manual screen change: {self.screen_names[self.current_screen]}")
-            return True
-        return False
-    
-    def get_current_screen_info(self):
-        """Get information about current screen"""
-        return {
-            'screen_number': self.current_screen,
-            'screen_name': self.screen_names[self.current_screen],
-            'total_screens': self.screens_total,
-            'menu_mode': self.menu_mode,
-            'scroll_offset': self.scroll_offsets[self.current_screen]
-        }
+        splash.append(self.create_text_line(status_message[:20], 40, 0x666666))
+        splash.append(self.create_text_line("Enhanced Features", 52, 0x444444))
     
     def display_error_screen(self, error_message):
-        """Show error screen for critical failures"""
+        """Enhanced error screen"""
         if not self.display:
             return
             
@@ -720,57 +490,35 @@ class DisplayManager:
         
         splash.append(self.create_text_line("ERROR", 8, 0x444444, True, 1))
         splash.append(self.create_text_line("SYSTEM FAULT", 20, 0x666666))
-        splash.append(self.create_text_line(error_message[:20], 32, 0x888888))  # Truncate long messages
+        splash.append(self.create_text_line(error_message[:20], 32, 0x888888))
         splash.append(self.create_text_line("Check connections", 44, 0xAAAAA))
         splash.append(self.create_text_line("Restart device", 56, 0xAAAAA))
         
-        print(f"❌ Error screen displayed: {error_message}")
+        print(f"❌ Enhanced error screen: {error_message}")
+
+# Helper functions for console output
+def get_enhanced_console_status(sensor_data):
+    """Get enhanced console status line"""
+    timestamp = time.localtime()
+    timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
     
-    def display_diagnostic_screen(self, diagnostic_info):
-        """Show diagnostic information screen"""
-        if not self.display:
-            return
-            
-        splash = displayio.Group()
-        self.display.root_group = splash
-        
-        splash.append(self.create_text_line("DIAGNOSTICS", 6, 0xFFFFFF))
-        splash.append(self.create_text_line(f"Sensors: {diagnostic_info.get('sensor_count', 0)}/3", 18, 0xCCCCCC, False))
-        splash.append(self.create_text_line(f"Memory: {diagnostic_info.get('memory_free', 0)}KB", 28, 0xCCCCCC, False))
-        splash.append(self.create_text_line(f"Uptime: {diagnostic_info.get('uptime', 0)}min", 38, 0xCCCCCC, False))
-        
-        status = "PASS" if diagnostic_info.get('all_ok', False) else "FAIL"
-        color = 0xFFFFFF if diagnostic_info.get('all_ok', False) else 0x888888
-        splash.append(self.create_text_line(f"Status: {status}", 50, color, False))
-        
-        print("🔧 Diagnostic screen displayed")
+    location = sensor_data.get('current_location', 'UNK')[:3]
+    weather_type = sensor_data.get('weather_forecast_type', 'UNK')[:4]
+    weather_conf = sensor_data.get('weather_confidence', 0)
+    fog_risk = sensor_data.get('fog_risk', 'UNK')[:3]
+    battery_usage = sensor_data.get('battery_usage_estimate', 100)
     
-    def set_display_brightness(self, brightness):
-        """Set display brightness (if supported by hardware)"""
-        # Note: SSD1325 brightness control would be implemented here
-        # This is a placeholder for future enhancement
-        print(f"🔆 Display brightness set to {brightness}%")
+    status_line = (
+        f"[{timestamp_str}] " +
+        f"LOC:{location} | " +
+        f"WX:{weather_type}({weather_conf}%) | " +
+        f"FOG:{fog_risk} | " +
+        f"CO₂:{sensor_data['co2']} | " +
+        f"T:{sensor_data['temperature']:.1f}C | " +
+        f"P:{sensor_data['pressure_hpa']:.1f}hPa | " +
+        f"RAD:{sensor_data['usv_h']:.3f}µSv/h | " +
+        f"PWR:{battery_usage}% | " +
+        f"GPS:{sensor_data.get('gps_satellites', 0)}sat"
+    )
     
-    def get_display_status(self):
-        """Get comprehensive display status"""
-        return {
-            'initialized': self.display is not None,
-            'current_screen': self.current_screen,
-            'screen_name': self.screen_names[self.current_screen],
-            'menu_mode': self.menu_mode,
-            'scroll_position': self.scroll_offsets[self.current_screen],
-            'last_update': self.display_last_update,
-            'screen_change_time': self.screen_change_time,
-            'screens_total': self.screens_total
-        }
-    
-    def __del__(self):
-        """Cleanup display resources when object is destroyed"""
-        try:
-            if self.display:
-                # Clear display
-                splash = displayio.Group()
-                self.display.root_group = splash
-                print("🖥️ Display cleared")
-        except:
-            pass
+    return status_line
