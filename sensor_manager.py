@@ -127,10 +127,10 @@ class AIFieldSensorManager:
         
         # Location-aware polling configuration
         self.location_polling_config = {
-            "OUTDOOR": {"gps": 5, "air": 5, "light": 3, "pressure": 3, "radiation": 1},
+            "OUTDOOR": {"gps": 5, "air": 5, "light": 3, "pressure": 10, "radiation": 1},
             "INDOOR":  {"gps": 30, "air": 3, "light": 10, "pressure": 15, "radiation": 1},
             "VEHICLE": {"gps": 3, "air": 8, "light": 15, "pressure": 0, "radiation": 1},
-            "CAVE":    {"gps": 0, "air": 2, "light": 30, "pressure": 5, "radiation": 1}
+            "CAVE":    {"gps": 0, "air": 2, "light": 30, "pressure": 15, "radiation": 1}
         }
         
         # Polling timing
@@ -246,9 +246,9 @@ class AIFieldSensorManager:
             try:
                 self.bmp390 = adafruit_bmp3xx.BMP3XX_I2C(self.i2c)
                 # Configure BMP390 settings for better accuracy
-                self.bmp390.pressure_oversampling = 8
-                self.bmp390.temperature_oversampling = 2
-                self.bmp390.filter_coefficient = 16
+                self.bmp390.pressure_oversampling = 4
+                self.bmp390.temperature_oversampling = 1
+                self.bmp390.filter_coefficient = 8
                 self.bmp390.standby_time = 5
                 
                 # Set sea level pressure for altitude calculations
