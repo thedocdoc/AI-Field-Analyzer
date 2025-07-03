@@ -1,12 +1,11 @@
 """
-AI Field Analyzer v1.9 - Fixed Enhanced Sensor Management System
------------------------------------------------------------------
-Clean version with all syntax errors resolved for CircuitPython compatibility.
+AI Field Analyzer v1.9 - Enhanced Sensor Management System (Weather Removed)
+---------------------------------------------------------------------------
+Clean version with weather functionality removed - using separate weather class.
 
 © 2025 Apollo Timbers. MIT License.
 """
 
-# Remove the deque import since we're not using it
 import time
 import board
 import busio
@@ -242,93 +241,6 @@ class GPSLocationDetector:
             return "NO_SIGNAL"
 
 # =============================================================================
-# SIMPLE WEATHER SYSTEM
-# =============================================================================
-
-class SimpleWeatherSystem:
-    """Simple outdoor-only weather system"""
-    
-    def __init__(self):
-        self.current_location = "OUTDOOR"
-        self.weather_active = False
-        self.current_pressure = 1013.25
-        self.current_temp = 20.0
-        self.current_humidity = 50.0
-        self.pressure_history = []
-        
-        # Weather results
-        self.weather_forecast_type = "INITIALIZING"
-        self.weather_confidence = 50
-        self.weather_description = "Starting weather analysis..."
-        self.dew_point = 0.0
-        self.pressure_tendency = 0.0
-        
-        print("🌪️ Simple Weather System initialized")
-    
-    def update_location_and_readings(self, pressure_hpa, temperature_c, humidity_percent, current_location):
-        """Update weather system"""
-        self.current_location = current_location
-        
-        if current_location == "OUTDOOR":
-            self.weather_active = True
-            self.current_pressure = pressure_hpa
-            self.current_temp = temperature_c
-            self.current_humidity = humidity_percent
-            
-            # Simple weather logic
-            self.dew_point = self._calculate_dew_point(temperature_c, humidity_percent)
-            temp_dewpoint_diff = temperature_c - self.dew_point
-            
-            # Basic fog detection
-            if temp_dewpoint_diff <= 1.0 and humidity_percent >= 95:
-                self.weather_forecast_type = "DENSE_FOG"
-                self.weather_confidence = 95
-                self.weather_description = "Dense fog forming - visibility will be severely limited"
-            elif temp_dewpoint_diff <= 3.0 and humidity_percent >= 85:
-                self.weather_forecast_type = "FOG_RISK"
-                self.weather_confidence = 75
-                self.weather_description = "Fog possible in next few hours"
-            else:
-                self.weather_forecast_type = "CLEAR"
-                self.weather_confidence = 80
-                self.weather_description = "Clear conditions expected"
-        else:
-            self.weather_active = False
-            self.weather_forecast_type = "PAUSED"
-            self.weather_confidence = 0
-            self.weather_description = f"Weather monitoring paused - {current_location.lower()} environment"
-    
-    def _calculate_dew_point(self, temp_c, humidity_percent):
-        """Calculate dew point"""
-        if humidity_percent <= 0:
-            return temp_c - 50
-        a, b = 17.27, 237.7
-        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity_percent / 100.0)
-        return (b * alpha) / (a - alpha)
-    
-    def get_forecast(self):
-        """Get current forecast"""
-        return {
-            'type': self.weather_forecast_type,
-            'confidence': self.weather_confidence,
-            'timing': '1-3 hours',
-            'description': self.weather_description
-        }
-    
-    def get_current_conditions(self):
-        """Get current conditions"""
-        return {
-            'pressure': self.current_pressure,
-            'temperature': self.current_temp,
-            'humidity': self.current_humidity,
-            'dew_point': self.dew_point,
-            'pressure_tendency': self.pressure_tendency,
-            'weather_active': self.weather_active,
-            'data_collection_active': self.weather_active,
-            'current_location': self.current_location
-        }
-
-# =============================================================================
 # MAIN ENHANCED SENSOR MANAGER
 # =============================================================================
 
@@ -349,9 +261,8 @@ class AIFieldSensorManager:
         self.button = None
         self.flashlight = None
         
-        # Enhanced systems - FIXED initialization
+        # Enhanced systems
         self.gps_location_detector = GPSLocationDetector()
-        self.weather_system = SimpleWeatherSystem()
         
         # Location state
         self.current_location = "OUTDOOR"
@@ -362,15 +273,15 @@ class AIFieldSensorManager:
         
         # Location-aware polling configuration
         self.location_polling_config = {
-            "OUTDOOR": {"gps": 5, "weather": 10, "air": 5, "light": 3, "pressure": 3, "radiation": 1},
-            "INDOOR":  {"gps": 30, "weather": 0, "air": 3, "light": 10, "pressure": 15, "radiation": 1},
-            "VEHICLE": {"gps": 3, "weather": 0, "air": 8, "light": 15, "pressure": 0, "radiation": 1},
-            "CAVE":    {"gps": 0, "weather": 0, "air": 2, "light": 30, "pressure": 5, "radiation": 1}
+            "OUTDOOR": {"gps": 5, "air": 5, "light": 3, "pressure": 3, "radiation": 1},
+            "INDOOR":  {"gps": 30, "air": 3, "light": 10, "pressure": 15, "radiation": 1},
+            "VEHICLE": {"gps": 3, "air": 8, "light": 15, "pressure": 0, "radiation": 1},
+            "CAVE":    {"gps": 0, "air": 2, "light": 30, "pressure": 5, "radiation": 1}
         }
         
         # Polling timing
         self.last_poll_times = {
-            "gps": 0, "weather": 0, "air": 0, "light": 0, "pressure": 0, "radiation": 0
+            "gps": 0, "air": 0, "light": 0, "pressure": 0, "radiation": 0
         }
         
         # Basic sensor data
@@ -387,24 +298,11 @@ class AIFieldSensorManager:
         self.cpm = 0
         self.usv_h = 0.0
         self.alpha = 53.032
-        self.radiation_warmup_start = 0    # NEW: Separate warmup timer
+        self.radiation_warmup_start = 0    # Separate warmup timer
         self.radiation_count_start = 0     # Renamed from radiation_start_time
         self.count_duration = 120
         self.last_pulse_time = 0
         self.previous_geiger_state = True
-        
-        # Weather data
-        self.weather_forecast_type = "INITIALIZING"
-        self.weather_confidence = 50
-        self.weather_description = "Starting weather analysis..."
-        self.fog_risk = "UNKNOWN"
-        self.storm_risk = "UNKNOWN"
-        self.dew_point = 0.0
-        self.pressure_tendency = 0.0
-        
-        # Legacy compatibility
-        self.pressure_trend = "STABLE"
-        self.weather_forecast = "Starting up..."
         
         # System monitoring
         self.battery_low = False
@@ -427,7 +325,7 @@ class AIFieldSensorManager:
         self.RADIATION_WARMUP = 120
         self.BATTERY_CHECK_INTERVAL = 60
         
-        print("🔧 Enhanced AI Field Sensor Manager v1.9 initialized")
+        print("🔧 Enhanced AI Field Sensor Manager v1.9 initialized (Weather Removed)")
     
     def initialize_hardware_pins(self):
        """Initialize all hardware pins"""
@@ -448,7 +346,7 @@ class AIFieldSensorManager:
            self.battery_low_pin = digitalio.DigitalInOut(board.GP0)
            self.battery_low_pin.switch_to_input(pull=digitalio.Pull.UP)
        
-           # FIXED: Set both timers once at startup
+           # Set both timers once at startup
            current_time = time.monotonic()
            self.radiation_warmup_start = current_time   # Warmup timer - never reset
            self.radiation_count_start = current_time    # Count timer - resets every 2 min
@@ -551,8 +449,6 @@ class AIFieldSensorManager:
         usage = 50  # Base
         if config["gps"] > 0:
             usage += 20
-        if config["weather"] > 0:
-            usage += 15
         if config["air"] > 0:
             usage += 10
         return min(100, usage)
@@ -572,11 +468,11 @@ class AIFieldSensorManager:
         return False
     
     def update_radiation_detection(self):
-       """Update radiation detection - FIXED TIMER LOGIC"""
+       """Update radiation detection"""
        current_time = time.monotonic()
        current_geiger_state = self.geiger_pin.value
    
-       # Pulse detection (unchanged)
+       # Pulse detection
        if self.previous_geiger_state and not current_geiger_state and current_time - self.last_pulse_time > 0.001:
            self.pulse_count += 1
            self.last_pulse_time = current_time
@@ -596,7 +492,7 @@ class AIFieldSensorManager:
            print(f"🔄 CPM UPDATE: {self.cpm} CPM, {self.usv_h:.3f} µSv/h")
 
     def is_radiation_ready(self):
-       """Check if radiation sensor is ready - FIXED"""
+       """Check if radiation sensor is ready"""
        elapsed = time.monotonic() - self.radiation_warmup_start
        ready = elapsed >= self.RADIATION_WARMUP
    
@@ -644,60 +540,6 @@ class AIFieldSensorManager:
                 print(f"⚠️ BMP180 read error: {e}")
         return False
     
-    def update_weather_system(self):
-        """Update weather system"""
-        try:
-            self.weather_system.current_lux = self.lux # pass lux data
-            self.weather_system.update_location_and_readings(
-                self.pressure_hpa, self.temperature, self.humidity, self.current_location
-            )
-            
-            forecast = self.weather_system.get_forecast()
-            conditions = self.weather_system.get_current_conditions()
-            
-            self.weather_forecast_type = forecast['type']
-            self.weather_confidence = forecast['confidence']
-            self.weather_description = forecast['description']
-            self.dew_point = conditions['dew_point']
-            self.pressure_tendency = conditions['pressure_tendency']
-            
-            # Calculate risk levels
-            self.fog_risk = self._calculate_fog_risk()
-            self.storm_risk = "LOW"  # Simplified for now
-            
-            # Legacy compatibility
-            self.weather_forecast = self.weather_description
-            self.pressure_trend = "STABLE"
-            
-        except Exception as e:
-            print(f"⚠️ Weather system error: {e}")
-    
-    def _calculate_fog_risk(self):
-        """Calculate fog risk using temperature, humidity, AND light levels"""
-        if self.current_location != "OUTDOOR":
-            return "UNKNOWN"
-    
-        temp_dewpoint_diff = self.temperature - self.dew_point
-    
-        # Get current lux level
-        current_lux = getattr(self, 'lux', 1000)  # Default if not available
-    
-        # Fog detection with lux fusion
-        if temp_dewpoint_diff <= 1.0 and self.humidity >= 95:
-            if current_lux < 500:  # Low visibility confirms fog
-                return "CONFIRMED"  # New level - fog actually present
-            else:
-                return "IMMINENT"   # Conditions right but still visible
-        elif temp_dewpoint_diff <= 3.0 and self.humidity >= 85:
-            if current_lux < 200:  # Very low light might indicate fog forming
-                return "FORMING"    # New level - fog developing
-            else:
-                return "HIGH"       # Just atmospheric conditions
-        elif current_lux < 100 and self.humidity > 70:
-            return "POSSIBLE"       # Low light + moisture = potential fog
-        else:
-            return "LOW"
-    
     def update_system_performance(self, loop_times=None):
         """Update system performance"""
         current_time = time.monotonic()
@@ -740,10 +582,6 @@ class AIFieldSensorManager:
         self.battery_check_time = current_time
         return self.battery_low
     
-    def is_radiation_ready(self):
-        """Check if radiation sensor is ready"""
-        return (time.monotonic() - self.radiation_warmup_start) >= self.RADIATION_WARMUP
-    
     def update_all_sensors(self, loop_times=None):
         """Update all sensors with adaptive polling"""
         
@@ -766,11 +604,6 @@ class AIFieldSensorManager:
         if self._should_update_sensor("pressure", config["pressure"]):
             self.update_pressure_sensor()
         
-        # Weather only when outdoor
-        if config["weather"] > 0 and self.current_location == "OUTDOOR":
-            if self._should_update_sensor("weather", config["weather"]):
-                self.update_weather_system()
-        
         # System monitoring
         self.update_system_performance(loop_times)
         self.check_battery_status()
@@ -778,10 +611,11 @@ class AIFieldSensorManager:
         return True
     
     def get_all_sensor_data(self):
-        """Get all sensor data including enhanced features"""
+        """Get all sensor data"""
         location_info = self.gps_location_detector.get_location_info()
         
-        base_data = {
+        return {
+            # Basic sensor data
             'co2': self.co2,
             'voc': self.voc,
             'temperature': self.temperature,
@@ -797,42 +631,22 @@ class AIFieldSensorManager:
             'memory_usage': self.memory_usage,
             'cpu_temp': self.cpu_temp,
             'avg_loop_time': self.avg_loop_time,
-            'max_loop_time': self.max_loop_time
-        }
-        
-        # Enhanced data
-        enhanced_data = {
-            # Location
+            'max_loop_time': self.max_loop_time,
+            
+            # Location data
             'current_location': location_info['location'],
             'location_confidence': location_info['confidence'],
             'location_description': f"{location_info['location']} ({location_info['confidence']}%)",
             
-            # GPS
+            # GPS data
             'gps_satellites': location_info['gps_satellites'],
             'gps_speed_kmh': location_info['gps_speed_kmh'],
             'gps_fix': location_info['gps_fix'],
             'gps_quality': self.gps_location_detector.get_gps_quality_description(),
             
-            # Weather
-            'weather_forecast_type': self.weather_forecast_type,
-            'weather_confidence': self.weather_confidence,
-            'weather_description': self.weather_description,
-            'fog_risk': self.fog_risk,
-            'storm_risk': self.storm_risk,
-            'dew_point': self.dew_point,
-            'pressure_tendency': self.pressure_tendency,
-            
-            # Power
+            # Power data
             'battery_usage_estimate': self.battery_usage_estimate,
-            
-            # Legacy compatibility
-            'pressure_trend': self.pressure_trend,
-            'pressure_change_rate': self.pressure_tendency,
-            'weather_forecast': self.weather_forecast
         }
-        
-        base_data.update(enhanced_data)
-        return base_data
     
     def initialize_all_sensors(self):
         """Initialize all sensors"""
@@ -884,12 +698,6 @@ class AIFieldSensorManager:
         print(f"  Current: {location_info['location']} ({location_info['confidence']}% confidence)")
         print(f"  GPS: {location_info['gps_satellites']} satellites")
         
-        # Weather status
-        print(f"\n🌪️ WEATHER STATUS:")
-        print(f"  Active: {self.weather_system.weather_active}")
-        print(f"  Location: {self.current_location}")
-        print(f"  Forecast: {self.weather_forecast_type}")
-        
         # Performance status
         print(f"\n⚡ PERFORMANCE STATUS:")
         print(f"  CPU Usage: {self.cpu_usage:.1f}%")
@@ -911,7 +719,7 @@ class AIFieldSensorManager:
 
 def test_enhanced_sensor_manager():
     """Test the enhanced sensor manager"""
-    print("\n🧪 Testing Enhanced AI Field Analyzer v1.9")
+    print("\n🧪 Testing Enhanced AI Field Analyzer v1.9 (Weather Removed)")
     print("=" * 60)
     
     # Initialize
@@ -943,40 +751,32 @@ def test_enhanced_sensor_manager():
         sensor_data = sensors.get_all_sensor_data()
         
         print(f"    Detected: {sensor_data['current_location']} ({sensor_data['location_confidence']}%)")
-        print(f"    Weather: {sensor_data['weather_forecast_type']}")
         print(f"    Battery: {sensor_data['battery_usage_estimate']}%")
+        print(f"    GPS Quality: {sensor_data['gps_quality']}")
         
         time.sleep(1)
     
-    # Test weather
-    print("\n--- Weather System Test ---")
+    # Test basic sensor readings
+    print("\n--- Basic Sensor Test ---")
     sensors.current_location = "OUTDOOR"
+    sensors.update_all_sensors()
     
-    weather_tests = [
-        (22.0, 45, "Normal conditions"),
-        (15.0, 95, "Fog conditions"),
-    ]
-    
-    for temp, humidity, description in weather_tests:
-        print(f"\n  Testing: {description}")
-        sensors.temperature = temp
-        sensors.humidity = humidity
-        sensors.update_weather_system()
-        
-        sensor_data = sensors.get_all_sensor_data()
-        print(f"    Forecast: {sensor_data['weather_forecast_type']} ({sensor_data['weather_confidence']}%)")
-        print(f"    Fog Risk: {sensor_data['fog_risk']}")
-        time.sleep(1)
+    sensor_data = sensors.get_all_sensor_data()
+    print(f"  CO2: {sensor_data['co2']} ppm")
+    print(f"  Temperature: {sensor_data['temperature']:.1f}°C")
+    print(f"  Humidity: {sensor_data['humidity']:.1f}%")
+    print(f"  Light: {sensor_data['lux']} lux")
+    print(f"  Pressure: {sensor_data['pressure_hpa']:.1f} hPa")
+    print(f"  Radiation: {sensor_data['cpm']} CPM ({'Ready' if sensor_data['radiation_ready'] else 'Warming up'})")
     
     # Run diagnostics
     print("\n--- System Diagnostics ---")
     sensors.run_diagnostics()
     
     print(f"\n✅ Enhanced sensor manager test complete!")
-    print("🎯 Ready for integration!")
+    print("🎯 Ready for integration with separate weather class!")
     
     return sensors
 
 if __name__ == "__main__":
     test_enhanced_sensor_manager()
-
