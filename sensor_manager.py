@@ -2,6 +2,7 @@
 AI Field Analyzer v1.9 - Enhanced Sensor Management System (Weather Removed)
 ---------------------------------------------------------------------------
 Clean version with weather functionality removed - using separate weather class.
+Updated with BMP390 sensor support.
 
 © 2025 Apollo Timbers. MIT License.
 """
@@ -13,157 +14,10 @@ import digitalio
 import microcontroller
 import adafruit_scd4x
 import adafruit_tsl2591
+import adafruit_bmp3xx
 import gc
 import struct
 import math
-
-# =============================================================================
-# SIMPLE BMP180 DRIVER (Your existing working code)
-# =============================================================================
-
-class SimpleBMP180:
-    """Custom BMP180 driver for pressure and temperature"""
-    
-    def __init__(self, i2c_bus):
-        self.i2c = i2c_bus
-        self.address = 0x77
-        
-        # BMP180 calibration coefficients
-        self.cal_AC1 = 0
-        self.cal_AC2 = 0
-        self.cal_AC3 = 0
-        self.cal_AC4 = 0
-        self.cal_AC5 = 0
-        self.cal_AC6 = 0
-        self.cal_B1 = 0
-        self.cal_B2 = 0
-        self.cal_MB = 0
-        self.cal_MC = 0
-        self.cal_MD = 0
-        
-        if self._check_device():
-            self._read_calibration()
-            print("✅ BMP180 initialized successfully")
-        else:
-            raise RuntimeError("BMP180 not found at 0x77")
-    
-    def _check_device(self):
-        try:
-            while not self.i2c.try_lock():
-                pass
-            self.i2c.writeto(self.address, bytes([0xD0]))
-            result = bytearray(1)
-            self.i2c.readfrom_into(self.address, result)
-            chip_id = result[0]
-            return chip_id == 0x55
-        except Exception:
-            return False
-        finally:
-            self.i2c.unlock()
-    
-    def _read_calibration(self):
-        try:
-            while not self.i2c.try_lock():
-                pass
-            self.i2c.writeto(self.address, bytes([0xAA]))
-            cal_data = bytearray(22)
-            self.i2c.readfrom_into(self.address, cal_data)
-            
-            self.cal_AC1 = struct.unpack('>h', cal_data[0:2])[0]
-            self.cal_AC2 = struct.unpack('>h', cal_data[2:4])[0]
-            self.cal_AC3 = struct.unpack('>h', cal_data[4:6])[0]
-            self.cal_AC4 = struct.unpack('>H', cal_data[6:8])[0]
-            self.cal_AC5 = struct.unpack('>H', cal_data[8:10])[0]
-            self.cal_AC6 = struct.unpack('>H', cal_data[10:12])[0]
-            self.cal_B1 = struct.unpack('>h', cal_data[12:14])[0]
-            self.cal_B2 = struct.unpack('>h', cal_data[14:16])[0]
-            self.cal_MB = struct.unpack('>h', cal_data[16:18])[0]
-            self.cal_MC = struct.unpack('>h', cal_data[18:20])[0]
-            self.cal_MD = struct.unpack('>h', cal_data[20:22])[0]
-        except Exception as e:
-            print(f"❌ Error reading calibration: {e}")
-            raise
-        finally:
-            self.i2c.unlock()
-    
-    def _read_raw_temperature(self):
-        try:
-            while not self.i2c.try_lock():
-                pass
-            self.i2c.writeto(self.address, bytes([0xF4, 0x2E]))
-            time.sleep(0.005)
-            self.i2c.writeto(self.address, bytes([0xF6]))
-            temp_data = bytearray(2)
-            self.i2c.readfrom_into(self.address, temp_data)
-            raw_temp = (temp_data[0] << 8) + temp_data[1]
-            return raw_temp
-        finally:
-            self.i2c.unlock()
-    
-    def _read_raw_pressure(self, oss=0):
-        try:
-            while not self.i2c.try_lock():
-                pass
-            cmd = 0x34 + (oss << 6)
-            self.i2c.writeto(self.address, bytes([0xF4, cmd]))
-            wait_times = [0.005, 0.008, 0.014, 0.026]
-            time.sleep(wait_times[oss])
-            self.i2c.writeto(self.address, bytes([0xF6]))
-            press_data = bytearray(3)
-            self.i2c.readfrom_into(self.address, press_data)
-            raw_pressure = ((press_data[0] << 16) + (press_data[1] << 8) + press_data[2]) >> (8 - oss)
-            return raw_pressure
-        finally:
-            self.i2c.unlock()
-    
-    @property
-    def temperature(self):
-        raw_temp = self._read_raw_temperature()
-        X1 = ((raw_temp - self.cal_AC6) * self.cal_AC5) >> 15
-        X2 = (self.cal_MC << 11) // (X1 + self.cal_MD)
-        B5 = X1 + X2
-        temp_c = ((B5 + 8) >> 4) / 10.0
-        return temp_c
-    
-    @property
-    def pressure(self):
-        raw_temp = self._read_raw_temperature()
-        raw_pressure = self._read_raw_pressure(oss=0)
-        
-        X1 = ((raw_temp - self.cal_AC6) * self.cal_AC5) >> 15
-        X2 = (self.cal_MC << 11) // (X1 + self.cal_MD)
-        B5 = X1 + X2
-        
-        B6 = B5 - 4000
-        X1 = (self.cal_B2 * ((B6 * B6) >> 12)) >> 11
-        X2 = (self.cal_AC2 * B6) >> 11
-        X3 = X1 + X2
-        B3 = (((self.cal_AC1 * 4 + X3) << 0) + 2) >> 2
-        
-        X1 = (self.cal_AC3 * B6) >> 13
-        X2 = (self.cal_B1 * ((B6 * B6) >> 12)) >> 16
-        X3 = ((X1 + X2) + 2) >> 2
-        B4 = (self.cal_AC4 * (X3 + 32768)) >> 15
-        B7 = (raw_pressure - B3) * (50000 >> 0)
-        
-        if B7 < 0x80000000:
-            pressure_pa = (B7 * 2) // B4
-        else:
-            pressure_pa = (B7 // B4) * 2
-        
-        X1 = (pressure_pa >> 8) * (pressure_pa >> 8)
-        X1 = (X1 * 3038) >> 16
-        X2 = (-7357 * pressure_pa) >> 16
-        pressure_pa = pressure_pa + ((X1 + X2 + 3791) >> 4)
-        
-        pressure_hpa = pressure_pa / 100.0
-        return pressure_hpa
-    
-    @property 
-    def altitude(self):
-        pressure_hpa = self.pressure
-        altitude_m = 44330 * (1 - (pressure_hpa / 1013.25) ** 0.1903)
-        return altitude_m
 
 # =============================================================================
 # SIMPLE GPS LOCATION DETECTOR
@@ -252,7 +106,7 @@ class AIFieldSensorManager:
         self.i2c = None
         self.scd41 = None
         self.tsl = None
-        self.bmp = None
+        self.bmp390 = None
         
         # Hardware pins
         self.geiger_pin = None
@@ -325,7 +179,7 @@ class AIFieldSensorManager:
         self.RADIATION_WARMUP = 120
         self.BATTERY_CHECK_INTERVAL = 60
         
-        print("🔧 Enhanced AI Field Sensor Manager v1.9 initialized (Weather Removed)")
+        print("🔧 Enhanced AI Field Sensor Manager v1.9 initialized (Weather Removed, BMP390)")
     
     def initialize_hardware_pins(self):
        """Initialize all hardware pins"""
@@ -388,16 +242,28 @@ class AIFieldSensorManager:
                 print(f"❌ TSL2591 initialization failed: {e}")
                 self.tsl = None
             
-            # BMP180
+            # BMP390
             try:
-                self.bmp = SimpleBMP180(self.i2c)
-                self.pressure_hpa = self.bmp.pressure
-                self.altitude_m = self.bmp.altitude
+                self.bmp390 = adafruit_bmp3xx.BMP3XX_I2C(self.i2c)
+                # Configure BMP390 settings for better accuracy
+                self.bmp390.pressure_oversampling = 8
+                self.bmp390.temperature_oversampling = 2
+                self.bmp390.filter_coefficient = 16
+                self.bmp390.standby_time = 5
+                
+                # Set sea level pressure for altitude calculations
+                self.bmp390.sea_level_pressure = 1013.25
+                
+                # Read initial values
+                self.pressure_hpa = self.bmp390.pressure
+                self.altitude_m = self.bmp390.altitude
+                
                 sensors_initialized += 1
-                print(f"✅ BMP180 sensor ready - Initial: {self.pressure_hpa:.1f} hPa")
+                print(f"✅ BMP390 sensor ready - Initial: {self.pressure_hpa:.1f} hPa, {self.altitude_m:.1f}m")
+                
             except Exception as e:
-                print(f"❌ BMP180 initialization failed: {e}")
-                self.bmp = None
+                print(f"❌ BMP390 initialization failed: {e}")
+                self.bmp390 = None
                 
         except Exception as e:
             print(f"❌ I2C bus initialization failed: {e}")
@@ -531,13 +397,13 @@ class AIFieldSensorManager:
     
     def update_pressure_sensor(self):
         """Update pressure sensor"""
-        if self.bmp:
+        if self.bmp390:
             try:
-                self.pressure_hpa = self.bmp.pressure
-                self.altitude_m = self.bmp.altitude
+                self.pressure_hpa = self.bmp390.pressure
+                self.altitude_m = self.bmp390.altitude
                 return True
             except Exception as e:
-                print(f"⚠️ BMP180 read error: {e}")
+                print(f"⚠️ BMP390 read error: {e}")
         return False
     
     def update_system_performance(self, loop_times=None):
@@ -582,6 +448,22 @@ class AIFieldSensorManager:
         self.battery_check_time = current_time
         return self.battery_low
     
+    def set_sea_level_pressure(self, pressure_hpa):
+        """Set sea level pressure for altitude calculations"""
+        if self.bmp390:
+            self.bmp390.sea_level_pressure = pressure_hpa
+            print(f"📊 Sea level pressure set to {pressure_hpa:.1f} hPa")
+    
+    def get_bmp390_temperature(self):
+        """Get temperature from BMP390 sensor"""
+        if self.bmp390:
+            try:
+                return self.bmp390.temperature
+            except Exception as e:
+                print(f"⚠️ BMP390 temperature read error: {e}")
+                return None
+        return None
+    
     def update_all_sensors(self, loop_times=None):
         """Update all sensors with adaptive polling"""
         
@@ -614,6 +496,9 @@ class AIFieldSensorManager:
         """Get all sensor data"""
         location_info = self.gps_location_detector.get_location_info()
         
+        # Get BMP390 temperature if available
+        bmp390_temp = self.get_bmp390_temperature()
+        
         return {
             # Basic sensor data
             'co2': self.co2,
@@ -632,6 +517,10 @@ class AIFieldSensorManager:
             'cpu_temp': self.cpu_temp,
             'avg_loop_time': self.avg_loop_time,
             'max_loop_time': self.max_loop_time,
+            
+            # BMP390 specific data
+            'bmp390_temperature': bmp390_temp,
+            'sea_level_pressure': self.bmp390.sea_level_pressure if self.bmp390 else 1013.25,
             
             # Location data
             'current_location': location_info['location'],
@@ -683,7 +572,7 @@ class AIFieldSensorManager:
             'i2c_bus': self.i2c is not None,
             'scd41': self.scd41 is not None,
             'tsl2591': self.tsl is not None,
-            'bmp180': self.bmp is not None,
+            'bmp390': self.bmp390 is not None,
             'geiger_counter': self.geiger_pin is not None,
             'battery_monitor': self.battery_low_pin is not None
         }
@@ -691,6 +580,14 @@ class AIFieldSensorManager:
         for sensor, active in sensors.items():
             icon = "✅" if active else "❌"
             print(f"  {icon} {sensor.upper()}")
+        
+        # BMP390 specific diagnostics
+        if self.bmp390:
+            print(f"\n📊 BMP390 STATUS:")
+            print(f"  Pressure Oversampling: {self.bmp390.pressure_oversampling}")
+            print(f"  Temperature Oversampling: {self.bmp390.temperature_oversampling}")
+            print(f"  Filter Coefficient: {self.bmp390.filter_coefficient}")
+            print(f"  Sea Level Pressure: {self.bmp390.sea_level_pressure:.1f} hPa")
         
         # Location status
         location_info = self.gps_location_detector.get_location_info()
@@ -719,7 +616,7 @@ class AIFieldSensorManager:
 
 def test_enhanced_sensor_manager():
     """Test the enhanced sensor manager"""
-    print("\n🧪 Testing Enhanced AI Field Analyzer v1.9 (Weather Removed)")
+    print("\n🧪 Testing Enhanced AI Field Analyzer v1.9 (BMP390 Version)")
     print("=" * 60)
     
     # Initialize
@@ -730,6 +627,21 @@ def test_enhanced_sensor_manager():
     print("\n--- Hardware Initialization Test ---")
     init_success = sensors.initialize_all_sensors()
     print(f"Initialization: {'✅ SUCCESS' if init_success else '❌ FAILED'}")
+    
+    # Test BMP390 specific features
+    print("\n--- BMP390 Specific Tests ---")
+    if sensors.bmp390:
+        print("  Testing sea level pressure adjustment...")
+        sensors.set_sea_level_pressure(1010.0)
+        time.sleep(0.1)
+        
+        sensor_data = sensors.get_all_sensor_data()
+        print(f"  BMP390 Temperature: {sensor_data['bmp390_temperature']:.1f}°C")
+        print(f"  Pressure: {sensor_data['pressure_hpa']:.1f} hPa")
+        print(f"  Altitude: {sensor_data['altitude_m']:.1f} m")
+        print(f"  Sea Level Pressure: {sensor_data['sea_level_pressure']:.1f} hPa")
+    else:
+        print("  ❌ BMP390 not available for testing")
     
     # Test location scenarios
     print("\n--- Location Detection Test ---")
@@ -767,6 +679,7 @@ def test_enhanced_sensor_manager():
     print(f"  Humidity: {sensor_data['humidity']:.1f}%")
     print(f"  Light: {sensor_data['lux']} lux")
     print(f"  Pressure: {sensor_data['pressure_hpa']:.1f} hPa")
+    print(f"  Altitude: {sensor_data['altitude_m']:.1f} m")
     print(f"  Radiation: {sensor_data['cpm']} CPM ({'Ready' if sensor_data['radiation_ready'] else 'Warming up'})")
     
     # Run diagnostics
@@ -775,6 +688,7 @@ def test_enhanced_sensor_manager():
     
     print(f"\n✅ Enhanced sensor manager test complete!")
     print("🎯 Ready for integration with separate weather class!")
+    print("🌟 BMP390 features: Higher accuracy, configurable oversampling, and built-in filtering!")
     
     return sensors
 
