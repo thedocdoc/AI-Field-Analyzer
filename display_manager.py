@@ -144,6 +144,47 @@ class DisplayManager:
         except Exception as e:
             print(f"Scroll error: {e}")
             return 0
+
+    def get_enhanced_weather_warning_with_countdown(self, sensor_data):
+        """Enhanced weather warnings with countdown and storm details"""
+        current_location = sensor_data.get('current_location', 'UNKNOWN')
+        storm_prob = sensor_data.get('weather_storm_probability', 0)
+        weather_type = sensor_data.get('weather_forecast_type', 'UNKNOWN')
+        weather_confidence = sensor_data.get('weather_confidence', 0)
+        arrival_timing = sensor_data.get('weather_arrival_timing', 'N/A')
+        
+        if current_location != "OUTDOOR":
+            return f"Weather monitoring paused - {current_location.lower()} environment", 0x888888
+        
+        # Storm warnings with countdown
+        if storm_prob >= 80:
+            if arrival_timing != 'N/A':
+                return f"SEVERE STORM INCOMING: {storm_prob}% in {arrival_timing}", 0x666666
+            else:
+                return f"SEVERE STORM WARNING: {storm_prob}% probability detected", 0x666666
+        
+        elif storm_prob >= 60:
+            if arrival_timing != 'N/A':
+                return f"STORM LIKELY: {storm_prob}% chance, arriving {arrival_timing}", 0x888888
+            else:
+                return f"STORM LIKELY: {storm_prob}% probability - Monitor conditions", 0x888888
+        
+        elif storm_prob >= 30:
+            if arrival_timing != 'N/A':
+                return f"WEATHER CHANGE: {storm_prob}% chance in {arrival_timing}", 0xAAAAA
+            else:
+                return f"WEATHER CHANGE: {storm_prob}% - Conditions developing", 0xAAAAA
+        
+        elif storm_prob >= 10:
+            return f"MONITORING: {storm_prob}% storm chance - Conditions stable", 0xCCCCCC
+        
+        else:
+            # Clear conditions
+            if weather_type == "STABLE":
+                return f"CLEAR CONDITIONS: Weather stable ({weather_confidence}% confidence)", 0xFFFFFF
+            else:
+                return f"CLEAR: {weather_type} conditions ({weather_confidence}% conf)", 0xFFFFFF
+
     def get_enhanced_weather_warning(self, sensor_data):
         """Enhanced weather warnings using new data"""
         current_location = sensor_data.get('current_location', 'UNKNOWN')
@@ -212,6 +253,53 @@ class DisplayManager:
             return f"POWER SAVE: {current_location} mode - {power_savings}% savings", 0xAAAAA
         else:
             return f"SYSTEM OPTIMAL: {current_location} mode - All systems nominal", 0xFFFFFF
+
+    def get_enhanced_summary_warning_with_weather(self, sensor_data):
+        """Enhanced summary warning with weather priority"""
+        alerts = []
+        current_location = sensor_data.get('current_location', 'UNKNOWN')
+        storm_prob = sensor_data.get('weather_storm_probability', 0)
+        arrival_timing = sensor_data.get('weather_arrival_timing', 'N/A')
+        
+        # Weather alerts have priority
+        if storm_prob >= 70:
+            if arrival_timing != 'N/A':
+                alerts.append(f"STORM-{arrival_timing}")
+            else:
+                alerts.append(f"STORM-{storm_prob}%")
+        elif storm_prob >= 40:
+            alerts.append(f"WEATHER-{storm_prob}%")
+        
+        # Other alerts
+        if sensor_data['co2'] >= 1000:
+            alerts.append("CO2-HIGH")
+        
+        if sensor_data.get('battery_low', False):
+            alerts.append("BATTERY-LOW")
+        
+        if sensor_data.get('usv_h', 0) > 0.5:
+            alerts.append("RADIATION")
+        
+        if alerts:
+            status_msg = f"{current_location}: " + " | ".join(alerts[:2])
+            # Color based on severity
+            if storm_prob >= 70 or sensor_data.get('battery_low', False):
+                status_color = 0x666666  # High priority
+            elif storm_prob >= 40 or sensor_data['co2'] >= 1000:
+                status_color = 0x888888  # Medium priority
+            else:
+                status_color = 0xAAAAA  # Low priority
+        else:
+            # All clear
+            battery_usage = sensor_data.get('battery_usage_estimate', 100)
+            power_savings = 100 - battery_usage
+            if power_savings > 0:
+                status_msg = f"{current_location} MODE: {power_savings}% power savings, all clear"
+            else:
+                status_msg = f"{current_location} MODE: All systems optimal, weather clear"
+            status_color = 0xFFFFFF
+        
+        return status_msg, status_color
     
     def build_screen(self, screen_num, sensor_data, timestamp_str):
         """Build screen with enhanced data - FIXED VERSION"""
@@ -258,23 +346,46 @@ class DisplayManager:
                 splash.append(self.create_text_line(f"LEVEL:{condition}", 28, 0xAAAAA, False))
                 warning_msg, warning_color = self.get_light_warning(sensor_data['lux'])
                 
-            elif screen_num == 3:  # Enhanced Weather
+            elif screen_num == 3:  # Enhanced Weather Screen
                 splash.append(self.create_text_line("WEATHER", 6, 0xFFFFFF))
                 
                 current_location = sensor_data.get('current_location', 'UNKNOWN')
                 if current_location == "OUTDOOR":
-                    splash.append(self.create_text_line(f"PRESS:{sensor_data['pressure_hpa']:.1f}hPa", 18, 0xCCCCCC, False))
+                    # Line 1: Pressure
+                    splash.append(self.create_text_line(f"PRESS:{sensor_data['pressure_hpa']:.1f}hPa", 16, 0xCCCCCC, False))
+                    
+                    # Line 2: Storm probability and type
+                    storm_prob = sensor_data.get('weather_storm_probability', 0)
                     weather_type = sensor_data.get('weather_forecast_type', 'UNKNOWN')
+                    
+                    if storm_prob > 0:
+                        # Show probability percentage
+                        type_short = weather_type.replace('_', '')[:8]  # Shorten long names
+                        splash.append(self.create_text_line(f"{type_short}:{storm_prob}%", 26, 0xCCCCCC, False))
+                    else:
+                        splash.append(self.create_text_line(f"{weather_type[:12]}", 26, 0xCCCCCC, False))
+                    
+                    # Line 3: Storm timing or confidence
+                    arrival_timing = sensor_data.get('weather_arrival_timing', 'N/A')
                     weather_conf = sensor_data.get('weather_confidence', 0)
-                    splash.append(self.create_text_line(f"{weather_type}:{weather_conf}%", 28, 0xCCCCCC, False))
-                    fog_risk = sensor_data.get('fog_risk', 'UNKNOWN')
-                    splash.append(self.create_text_line(f"FOG:{fog_risk}", 38, 0xAAAAA, False))
+                    
+                    if arrival_timing != 'N/A' and storm_prob > 30:
+                        # Show countdown when storm is coming
+                        timing_short = arrival_timing.replace(' hours', 'h').replace(' minutes', 'm')
+                        splash.append(self.create_text_line(f"ETA:{timing_short}", 36, 0xAAAAA, False))
+                    else:
+                        # Show confidence when no storm
+                        splash.append(self.create_text_line(f"CONF:{weather_conf}%", 36, 0xAAAAA, False))
+                    
+                    # Enhanced weather warning with countdown
+                    warning_msg, warning_color = self.get_enhanced_weather_warning_with_countdown(sensor_data)
+                    
                 else:
+                    # Indoor mode - show location and status
                     splash.append(self.create_text_line(f"LOCATION:{current_location}", 18, 0x888888, False))
                     splash.append(self.create_text_line("Weather monitoring", 28, 0x888888, False))
                     splash.append(self.create_text_line("paused indoors", 38, 0x888888, False))
-                
-                warning_msg, warning_color = self.get_enhanced_weather_warning(sensor_data)
+                    warning_msg, warning_color = self.get_enhanced_weather_warning(sensor_data)
                 
             elif screen_num == 4:  # Radiation
                 splash.append(self.create_text_line("RADIATION", 6, 0xFFFFFF))
@@ -293,16 +404,28 @@ class DisplayManager:
                 splash.append(self.create_text_line(f"PWR:{battery_usage}% {current_location[:3]}", 28, 0xCCCCCC, False))
                 warning_msg, warning_color = self.get_system_warning(sensor_data)
                 
-            elif screen_num == 6:  # Enhanced Summary
+            elif screen_num == 6:  # Enhanced Summary with Weather
                 splash.append(self.create_text_line("SUMMARY", 6, 0xFFFFFF))
+                
+                # Line 1: Air quality
                 splash.append(self.create_text_line(f"CO2:{sensor_data['co2']} VOC:{sensor_data['voc']//10}", 16, 0xCCCCCC, False))
+                
+                # Line 2: Environment
                 splash.append(self.create_text_line(f"T:{sensor_data['temperature']:.1f}C H:{sensor_data['humidity']:.0f}%", 25, 0xCCCCCC, False))
                 
+                # Line 3: Location, Weather, and Battery - Enhanced with storm info
                 location = sensor_data.get('current_location', 'UNK')[:3]
-                weather = sensor_data.get('weather_forecast_type', 'UNK')[:4]
+                storm_prob = sensor_data.get('weather_storm_probability', 0)
                 battery = sensor_data.get('battery_usage_estimate', 100)
-                splash.append(self.create_text_line(f"LOC:{location} WX:{weather} B:{battery}%", 35, 0xCCCCCC, False))
-                warning_msg, warning_color = self.get_summary_warning(sensor_data)
+                
+                if storm_prob > 30:
+                    # Show storm probability instead of weather type when storm is possible
+                    splash.append(self.create_text_line(f"LOC:{location} STORM:{storm_prob}% B:{battery}%", 35, 0xCCCCCC, False))
+                else:
+                    weather = sensor_data.get('weather_forecast_type', 'UNK')[:4]
+                    splash.append(self.create_text_line(f"LOC:{location} WX:{weather} B:{battery}%", 35, 0xCCCCCC, False))
+                
+                warning_msg, warning_color = self.get_enhanced_summary_warning_with_weather(sensor_data)
                 
             elif screen_num == 7:  # NEW: Location & GPS
                 splash.append(self.create_text_line("LOCATION & GPS", 6, 0xFFFFFF))
@@ -503,16 +626,24 @@ def get_enhanced_console_status(sensor_data):
     timestamp_str = f"{timestamp.tm_hour:02}:{timestamp.tm_min:02}:{timestamp.tm_sec:02}"
     
     location = sensor_data.get('current_location', 'UNK')[:3]
-    weather_type = sensor_data.get('weather_forecast_type', 'UNK')[:4]
+    storm_prob = sensor_data.get('weather_storm_probability', 0)
+    weather_type = sensor_data.get('weather_forecast_type', 'UNK')[:6]
     weather_conf = sensor_data.get('weather_confidence', 0)
-    fog_risk = sensor_data.get('fog_risk', 'UNK')[:3]
+    arrival_timing = sensor_data.get('weather_arrival_timing', 'N/A')
     battery_usage = sensor_data.get('battery_usage_estimate', 100)
+    
+    # Build weather status with storm priority
+    if storm_prob >= 30 and arrival_timing != 'N/A':
+        weather_status = f"STORM:{storm_prob}%/{arrival_timing}"
+    elif storm_prob >= 10:
+        weather_status = f"WX:{weather_type}({storm_prob}%)"
+    else:
+        weather_status = f"WX:{weather_type}({weather_conf}%)"
     
     status_line = (
         f"[{timestamp_str}] " +
         f"LOC:{location} | " +
-        f"WX:{weather_type}({weather_conf}%) | " +
-        f"FOG:{fog_risk} | " +
+        f"{weather_status} | " +
         f"CO₂:{sensor_data['co2']} | " +
         f"T:{sensor_data['temperature']:.1f}C | " +
         f"P:{sensor_data['pressure_hpa']:.1f}hPa | " +
