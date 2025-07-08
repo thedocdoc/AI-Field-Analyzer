@@ -1,5 +1,5 @@
 """
-AI Field Analyzer v1.9 - Main Application (Fixed)
+AI Field Analyzer v2.0 - Main Application (Fixed)
 -------------------------------------------------
 Clean main application using modular sensor and display managers.
 Optimized for maximum radiation detection sensitivity with professional
@@ -174,7 +174,7 @@ def coordinated_startup(display_manager, sensors):
     Professional startup sequence with countdown timer and parallel sensor initialization.
     Provides visual feedback during the sensor warm-up period.
     """
-    print("🚀 AI Field Analyzer v1.9 startup initiated...")
+    print("🚀 AI Field Analyzer v2.0 startup initiated...")
     
     # Show initial startup screen
     display_manager.display_startup_screen()
@@ -269,7 +269,7 @@ def main():
     Coordinates all subsystems including weather prediction for optimal environmental monitoring.
     """
     print("\n" + "="*70)
-    print("AI FIELD ANALYZER v1.9 - ADVANCED ENVIRONMENTAL MONITORING")
+    print("AI FIELD ANALYZER v2.0 - ADVANCED ENVIRONMENTAL MONITORING")
     print("Location Detection • Radiation Detection • Air Quality • Weather Prediction")
     print("© 2025 Apollo Timbers - MIT License")
     print("="*70)
@@ -429,7 +429,7 @@ def main():
         except Exception as cleanup_error:
             print(f"⚠️ Cleanup warning: {cleanup_error}")
     
-    print("👋 AI Field Analyzer v1.9 shutdown complete")
+    print("👋 AI Field Analyzer v2.0 shutdown complete")
     return True
 
 
@@ -462,7 +462,7 @@ def run_comprehensive_diagnostics():
     Useful for troubleshooting hardware and software issues.
     """
     print("\n" + "="*60)
-    print("AI FIELD ANALYZER v1.9 - COMPREHENSIVE DIAGNOSTICS")
+    print("AI FIELD ANALYZER v2.0 - COMPREHENSIVE DIAGNOSTICS")
     print("="*60)
     
     # Initialize all components for testing
@@ -586,7 +586,7 @@ if __name__ == "__main__":
         if sys.argv[1] == "--diagnostics" or sys.argv[1] == "-d":
             run_comprehensive_diagnostics()
         elif sys.argv[1] == "--help" or sys.argv[1] == "-h":
-            print("AI Field Analyzer v1.9 - Command Line Options:")
+            print("AI Field Analyzer v2.0 - Command Line Options:")
             print("  python main.py                 # Normal operation")
             print("  python main.py --diagnostics   # Run system diagnostics") 
             print("  python main.py --help          # Show this help")
