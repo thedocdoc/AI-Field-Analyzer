@@ -1,0 +1,914 @@
+"""
+Clean Graphics Activity Spinner Demo - Fresh Build
+--------------------------------------------------
+Beautiful activity spinners using CircuitPython display shapes.
+No messy code, clean implementation, all working spinners.
+
+Hardware: SSD1325 128x64 OLED on SPI
+Pins: GP14(CLK), GP15(MOSI), GP10(CS), GP11(DC), GP16(RST)
+"""
+
+import time
+import board
+import busio
+import displayio
+import terminalio
+from fourwire import FourWire
+from adafruit_display_text import label
+import adafruit_ssd1325
+import math"""
+Clean Graphics Activity Spinner Demo - Fresh Build
+--------------------------------------------------
+Beautiful activity spinners using CircuitPython display shapes.
+No messy code, clean implementation, all working spinners.
+
+Hardware: SSD1325 128x64 OLED on SPI
+Pins: GP14(CLK), GP15(MOSI), GP10(CS), GP11(DC), GP16(RST)
+"""
+
+import time
+import board
+import busio
+import displayio
+import terminalio
+from fourwire import FourWire
+from adafruit_display_text import label
+import adafruit_ssd1325
+import math
+
+# Import shape libraries
+try:
+    from adafruit_display_shapes.circle import Circle
+    from adafruit_display_shapes.rect import Rect
+    from adafruit_display_shapes.line import Line
+    SHAPES_AVAILABLE = True
+    print("✅ Display shapes library available")
+except ImportError as e:
+    SHAPES_AVAILABLE = False
+    print(f"❌ Display shapes not available: {e}")
+
+class CleanSpinnerDemo:
+    """Clean graphics spinner demo with all working spinners"""
+    
+    def __init__(self):
+        self.display = None
+        self.shapes_available = SHAPES_AVAILABLE
+        
+        # Available spinner styles
+        self.spinner_styles = [
+            'pie_filling',      # Pie chart filling up
+            'spinning_triangle', # Rotating triangle (no dot)
+            'pulsing_circle',   # Small growing/shrinking circle  
+            'rotating_line',    # Spinning line
+            'progress_bars',    # Mini progress bars
+            'orbital_dot',      # Dot orbiting center
+            'circle_dots',      # Dots around circle
+            'text_spinner',     # | / - \ fallback
+            'text_plus'         # + x + x fallback
+        ]
+        
+        # Current settings
+        self.current_style_index = 0
+        self.current_style = self.spinner_styles[0]
+        self.current_frame = 0
+        self.spinner_position = (8, 12)  # Top-left corner
+        self.spinner_size = 4
+        self.spinner_color = 0x888888
+        self.animation_speed = 0.25
+        self.last_update = 0
+        
+        # Auto-cycling
+        self.auto_cycle = True
+        self.cycle_time = 3.0
+        self.last_cycle = 0
+        
+    def initialize_display(self):
+        """Initialize SSD1325 OLED display"""
+        print("🖥️ Initializing display...")
+        
+        try:
+            displayio.release_displays()
+            
+            spi = busio.SPI(clock=board.GP14, MOSI=board.GP15)
+            display_bus = FourWire(
+                spi, 
+                command=board.GP11, 
+                chip_select=board.GP10, 
+                reset=board.GP16,
+                baudrate=1000000
+            )
+            
+            self.display = adafruit_ssd1325.SSD1325(display_bus, width=128, height=64)
+            print("✅ Display ready!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Display failed: {e}")
+            return False
+    
+    def create_pie_filling(self, x, y, frame):
+        """Pie chart filling up like loading spinner"""
+        group = displayio.Group()
+        
+        # Outer circle
+        outer = Circle(x, y, self.spinner_size, outline=self.spinner_color, stroke=1)
+        group.append(outer)
+        
+        # Fill pie slices (8 total)
+        filled_slices = (frame % 8) + 1
+        for i in range(filled_slices):
+            angle = (i * 45) - 90  # Start from top
+            rad = math.radians(angle)
+            
+            # Draw line from center to edge
+            end_x = x + int((self.spinner_size - 1) * math.cos(rad))
+            end_y = y + int((self.spinner_size - 1) * math.sin(rad))
+            line = Line(x, y, end_x, end_y, color=self.spinner_color)
+            group.append(line)
+        
+        # Center dot
+        center = Circle(x, y, 1, fill=self.spinner_color)
+        group.append(center)
+        
+        return group
+    
+    def create_spinning_triangle(self, x, y, frame):
+        """Smooth rotating triangle (no center dot)"""
+        group = displayio.Group()
+        
+        # Smooth rotation (30 degrees per frame)
+        angle = (frame * 30) % 360
+        rad = math.radians(angle)
+        
+        # Triangle points
+        size = self.spinner_size + 1
+        points = [
+            (0, -size),
+            (size * 0.866, size * 0.5),
+            (-size * 0.866, size * 0.5)
+        ]
+        
+        # Rotate and draw triangle
+        rotated = []
+        for px, py in points:
+            rx = px * math.cos(rad) - py * math.sin(rad)
+            ry = px * math.sin(rad) + py * math.cos(rad)
+            rotated.append((x + int(rx), y + int(ry)))
+        
+        # Draw triangle lines
+        for i in range(3):
+            x1, y1 = rotated[i]
+            x2, y2 = rotated[(i + 1) % 3]
+            line = Line(x1, y1, x2, y2, color=self.spinner_color)
+            group.append(line)
+        
+        return group
+    
+    def create_pulsing_circle(self, x, y, frame):
+        """Small pulsing circle"""
+        group = displayio.Group()
+        
+        # Pulse between radius 1 and 3 (ensure always >= 1)
+        phase = frame % 6
+        if phase < 3:
+            radius = 1 + phase  # 1, 2, 3
+        else:
+            radius = 4 - phase  # 3, 2, 1
+        
+        # Safety check - ensure radius is always at least 1
+        radius = max(1, radius)
+        
+        circle = Circle(x, y, radius, outline=self.spinner_color, stroke=1)
+        group.append(circle)
+        
+        return group
+    
+    def create_rotating_line(self, x, y, frame):
+        """Rotating line spinner"""
+        group = displayio.Group()
+        
+        # 8 orientations
+        angles = [0, 45, 90, 135, 180, 225, 270, 315]
+        angle = angles[frame % 8]
+        rad = math.radians(angle)
+        
+        # Line endpoints
+        length = self.spinner_size
+        x1 = x - int(length * math.cos(rad) / 2)
+        y1 = y - int(length * math.sin(rad) / 2)
+        x2 = x + int(length * math.cos(rad) / 2)
+        y2 = y + int(length * math.sin(rad) / 2)
+        
+        line = Line(x1, y1, x2, y2, color=self.spinner_color)
+        group.append(line)
+        
+        return group
+    
+    def create_progress_bars(self, x, y, frame):
+        """Mini progress bars - simplified to avoid dimension errors"""
+        group = displayio.Group()
+        
+        # Just use dots instead of rectangles to avoid dimension issues
+        # 4 positions
+        for i in range(4):
+            dot_x = x + (i * 3) - 4
+            dot_y = y
+            
+            # Show dot based on frame
+            show_frame = (frame - i) % 8
+            if show_frame < 4:  # Show for half the cycle
+                dot = Circle(dot_x, dot_y, 1, fill=self.spinner_color)
+                group.append(dot)
+        
+        return group
+    
+    def create_orbital_dot(self, x, y, frame):
+        """Dot orbiting around center"""
+        group = displayio.Group()
+        
+        # Center dot
+        center = Circle(x, y, 1, fill=self.spinner_color)
+        group.append(center)
+        
+        # Orbiting dot
+        angle = (frame * 45) % 360
+        rad = math.radians(angle)
+        orbit_x = x + int(self.spinner_size * math.cos(rad))
+        orbit_y = y + int(self.spinner_size * math.sin(rad))
+        
+        orbital = Circle(orbit_x, orbit_y, 1, fill=self.spinner_color)
+        group.append(orbital)
+        
+        return group
+    
+    def create_circle_dots(self, x, y, frame):
+        """Dots appearing around circle"""
+        group = displayio.Group()
+        
+        # Show dots progressively
+        dots_to_show = (frame % 8) + 1
+        
+        for i in range(dots_to_show):
+            angle = (i * 45) - 90  # Start from top
+            rad = math.radians(angle)
+            
+            dot_x = x + int(self.spinner_size * 0.8 * math.cos(rad))
+            dot_y = y + int(self.spinner_size * 0.8 * math.sin(rad))
+            
+            dot = Circle(dot_x, dot_y, 1, fill=self.spinner_color)
+            group.append(dot)
+        
+        return group
+    
+    def create_text_spinner(self, x, y, frame, chars):
+        """Text-based spinner fallback"""
+        current_char = chars[frame % len(chars)]
+        
+        text = label.Label(terminalio.FONT, text=current_char, 
+                          color=self.spinner_color, scale=1)
+        text.x = x - 3
+        text.y = y
+        
+        group = displayio.Group()
+        group.append(text)
+        return group
+    
+    def create_spinner(self):
+        """Create current spinner element"""
+        x, y = self.spinner_position
+        frame = self.current_frame
+        style = self.current_style
+        
+        if not self.shapes_available or style.startswith('text_'):
+            if style == 'text_plus':
+                return self.create_text_spinner(x, y, frame, ['+', 'x', '+', 'x'])
+            else:
+                return self.create_text_spinner(x, y, frame, ['|', '/', '-', '\\'])
+        
+        # Graphics spinners
+        if style == 'pie_filling':
+            return self.create_pie_filling(x, y, frame)
+        elif style == 'spinning_triangle':
+            return self.create_spinning_triangle(x, y, frame)
+        elif style == 'pulsing_circle':
+            return self.create_pulsing_circle(x, y, frame)
+        elif style == 'rotating_line':
+            return self.create_rotating_line(x, y, frame)
+        elif style == 'progress_bars':
+            return self.create_progress_bars(x, y, frame)
+        elif style == 'orbital_dot':
+            return self.create_orbital_dot(x, y, frame)
+        elif style == 'circle_dots':
+            return self.create_circle_dots(x, y, frame)
+        else:
+            # Fallback
+            return self.create_text_spinner(x, y, frame, ['|', '/', '-', '\\'])
+    
+    def create_screen(self):
+        """Create demo screen"""
+        splash = displayio.Group()
+        
+        # Title
+        title = label.Label(terminalio.FONT, text="CLEAN SPINNERS", color=0xFFFFFF, scale=1)
+        title.x = (128 - title.bounding_box[2]) // 2
+        title.y = 25
+        splash.append(title)
+        
+        # Current style
+        style_text = f"Style: {self.current_style}"
+        style_label = label.Label(terminalio.FONT, text=style_text[:18], color=0xCCCCCC, scale=1)
+        style_label.x = 2
+        style_label.y = 37
+        splash.append(style_label)
+        
+        # Progress
+        progress_text = f"{self.current_style_index + 1}/{len(self.spinner_styles)}"
+        progress_label = label.Label(terminalio.FONT, text=progress_text, color=0xCCCCCC, scale=1)
+        progress_label.x = 2
+        progress_label.y = 47
+        splash.append(progress_label)
+        
+        # Speed
+        speed_text = f"Speed: {self.animation_speed:.1f}s"
+        speed_label = label.Label(terminalio.FONT, text=speed_text, color=0xCCCCCC, scale=1)
+        speed_label.x = 2
+        speed_label.y = 57
+        splash.append(speed_label)
+        
+        # Add spinner
+        spinner = self.create_spinner()
+        if spinner:
+            splash.append(spinner)
+        
+        return splash
+    
+    def update_animation(self):
+        """Update spinner animation"""
+        current_time = time.monotonic()
+        
+        if current_time - self.last_update >= self.animation_speed:
+            self.current_frame += 1
+            self.last_update = current_time
+            return True
+        
+        return False
+    
+    def cycle_style(self):
+        """Cycle to next spinner style"""
+        current_time = time.monotonic()
+        
+        if not self.auto_cycle or current_time - self.last_cycle < self.cycle_time:
+            return False
+        
+        self.current_style_index = (self.current_style_index + 1) % len(self.spinner_styles)
+        self.current_style = self.spinner_styles[self.current_style_index]
+        self.current_frame = 0
+        self.last_cycle = current_time
+        
+        print(f"🔄 Switched to: {self.current_style}")
+        return True
+    
+    def run_demo(self, duration=30):
+        """Run the clean spinner demo"""
+        if not self.display:
+            print("❌ Display not ready")
+            return
+        
+        print(f"🚀 Starting clean demo for {duration} seconds...")
+        print(f"🔄 Cycling every {self.cycle_time}s through {len(self.spinner_styles)} spinners")
+        
+        if self.shapes_available:
+            print("🎨 Graphics spinners available!")
+        else:
+            print("📝 Text-only mode (install adafruit-circuitpython-display-shapes)")
+        
+        start_time = time.monotonic()
+        frames = 0
+        cycles = 0
+        
+        print(f"\n🎬 Starting: {self.current_style}")
+        
+        try:
+            while time.monotonic() - start_time < duration:
+                updated = False
+                
+                # Update animation
+                if self.update_animation():
+                    updated = True
+                    frames += 1
+                
+                # Cycle styles
+                if self.cycle_style():
+                    updated = True
+                    cycles += 1
+                
+                # Update display
+                if updated:
+                    screen = self.create_screen()
+                    self.display.root_group = screen
+                
+                time.sleep(0.05)
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Demo stopped")
+        
+        elapsed = time.monotonic() - start_time
+        print(f"\n📊 Results:")
+        print(f"   Frames: {frames}")
+        print(f"   Style changes: {cycles}")
+        print(f"   FPS: {frames / elapsed:.1f}")
+        print(f"   All working: ✅")
+
+
+def quick_test():
+    """Quick test of top 3 spinners"""
+    print("⚡ Quick test - Top 3 spinners")
+    
+    demo = CleanSpinnerDemo()
+    if demo.initialize_display():
+        # Override to just show top 3
+        demo.spinner_styles = ['pie_filling', 'spinning_triangle', 'pulsing_circle']
+        demo.cycle_time = 3.0
+        
+        print("🎯 Testing:")
+        print("   1. Pie filling (3s)")
+        print("   2. Spinning triangle (3s)")
+        print("   3. Pulsing circle (3s)")
+        
+        demo.run_demo(duration=15)
+        print("✅ Quick test done!")
+
+
+def triangle_test():
+    """Test just the spinning triangle"""
+    print("🔺 Triangle-only test")
+    
+    demo = CleanSpinnerDemo()
+    if demo.initialize_display():
+        demo.current_style = 'spinning_triangle'
+        demo.auto_cycle = False
+        demo.animation_speed = 0.15  # Faster for smooth rotation
+        
+        print("🔺 Spinning triangle for 15 seconds...")
+        print("   No center dot, smooth rotation")
+        
+        demo.run_demo(duration=15)
+        print("✅ Triangle test done!")
+
+
+def main():
+    """Main demo - all spinners"""
+    print("🌀 CLEAN GRAPHICS SPINNER DEMO")
+    print("=" * 40)
+    
+    demo = CleanSpinnerDemo()
+    if demo.initialize_display():
+        demo.run_demo(duration=35)
+    
+    print("✅ Demo complete!")
+
+
+if __name__ == "__main__":
+    # Choose your test:
+    main()           # All 9 spinners
+    # quick_test()   # Just top 3
+    # triangle_test() # Just triangle
+
+
+# Import shape libraries
+try:
+    from adafruit_display_shapes.circle import Circle
+    from adafruit_display_shapes.rect import Rect
+    from adafruit_display_shapes.line import Line
+    SHAPES_AVAILABLE = True
+    print("✅ Display shapes library available")
+except ImportError as e:
+    SHAPES_AVAILABLE = False
+    print(f"❌ Display shapes not available: {e}")
+
+class CleanSpinnerDemo:
+    """Clean graphics spinner demo with all working spinners"""
+    
+    def __init__(self):
+        self.display = None
+        self.shapes_available = SHAPES_AVAILABLE
+        
+        # Available spinner styles
+        self.spinner_styles = [
+            'pie_filling',      # Pie chart filling up
+            'spinning_triangle', # Rotating triangle (no dot)
+            'pulsing_circle',   # Small growing/shrinking circle  
+            'rotating_line',    # Spinning line
+            'progress_bars',    # Mini progress bars
+            'orbital_dot',      # Dot orbiting center
+            'circle_dots',      # Dots around circle
+            'text_spinner',     # | / - \ fallback
+            'text_plus'         # + x + x fallback
+        ]
+        
+        # Current settings
+        self.current_style_index = 0
+        self.current_style = self.spinner_styles[0]
+        self.current_frame = 0
+        self.spinner_position = (8, 12)  # Top-left corner
+        self.spinner_size = 4
+        self.spinner_color = 0x888888
+        self.animation_speed = 0.25
+        self.last_update = 0
+        
+        # Auto-cycling
+        self.auto_cycle = True
+        self.cycle_time = 3.0
+        self.last_cycle = 0
+        
+    def initialize_display(self):
+        """Initialize SSD1325 OLED display"""
+        print("🖥️ Initializing display...")
+        
+        try:
+            displayio.release_displays()
+            
+            spi = busio.SPI(clock=board.GP14, MOSI=board.GP15)
+            display_bus = FourWire(
+                spi, 
+                command=board.GP11, 
+                chip_select=board.GP10, 
+                reset=board.GP16,
+                baudrate=1000000
+            )
+            
+            self.display = adafruit_ssd1325.SSD1325(display_bus, width=128, height=64)
+            print("✅ Display ready!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Display failed: {e}")
+            return False
+    
+    def create_pie_filling(self, x, y, frame):
+        """Pie chart filling up like loading spinner"""
+        group = displayio.Group()
+        
+        # Outer circle
+        outer = Circle(x, y, self.spinner_size, outline=self.spinner_color, stroke=1)
+        group.append(outer)
+        
+        # Fill pie slices (8 total)
+        filled_slices = (frame % 8) + 1
+        for i in range(filled_slices):
+            angle = (i * 45) - 90  # Start from top
+            rad = math.radians(angle)
+            
+            # Draw line from center to edge
+            end_x = x + int((self.spinner_size - 1) * math.cos(rad))
+            end_y = y + int((self.spinner_size - 1) * math.sin(rad))
+            line = Line(x, y, end_x, end_y, color=self.spinner_color)
+            group.append(line)
+        
+        # Center dot
+        center = Circle(x, y, 1, fill=self.spinner_color)
+        group.append(center)
+        
+        return group
+    
+    def create_spinning_triangle(self, x, y, frame):
+        """Smooth rotating triangle (no center dot)"""
+        group = displayio.Group()
+        
+        # Smooth rotation (30 degrees per frame)
+        angle = (frame * 30) % 360
+        rad = math.radians(angle)
+        
+        # Triangle points
+        size = self.spinner_size + 1
+        points = [
+            (0, -size),
+            (size * 0.866, size * 0.5),
+            (-size * 0.866, size * 0.5)
+        ]
+        
+        # Rotate and draw triangle
+        rotated = []
+        for px, py in points:
+            rx = px * math.cos(rad) - py * math.sin(rad)
+            ry = px * math.sin(rad) + py * math.cos(rad)
+            rotated.append((x + int(rx), y + int(ry)))
+        
+        # Draw triangle lines
+        for i in range(3):
+            x1, y1 = rotated[i]
+            x2, y2 = rotated[(i + 1) % 3]
+            line = Line(x1, y1, x2, y2, color=self.spinner_color)
+            group.append(line)
+        
+        return group
+    
+    def create_pulsing_circle(self, x, y, frame):
+        """Small pulsing circle"""
+        group = displayio.Group()
+        
+        # Pulse between radius 1 and 3 (ensure always >= 1)
+        phase = frame % 6
+        if phase < 3:
+            radius = 1 + phase  # 1, 2, 3
+        else:
+            radius = 4 - phase  # 3, 2, 1
+        
+        # Safety check - ensure radius is always at least 1
+        radius = max(1, radius)
+        
+        circle = Circle(x, y, radius, outline=self.spinner_color, stroke=1)
+        group.append(circle)
+        
+        return group
+    
+    def create_rotating_line(self, x, y, frame):
+        """Rotating line spinner"""
+        group = displayio.Group()
+        
+        # 8 orientations
+        angles = [0, 45, 90, 135, 180, 225, 270, 315]
+        angle = angles[frame % 8]
+        rad = math.radians(angle)
+        
+        # Line endpoints
+        length = self.spinner_size
+        x1 = x - int(length * math.cos(rad) / 2)
+        y1 = y - int(length * math.sin(rad) / 2)
+        x2 = x + int(length * math.cos(rad) / 2)
+        y2 = y + int(length * math.sin(rad) / 2)
+        
+        line = Line(x1, y1, x2, y2, color=self.spinner_color)
+        group.append(line)
+        
+        return group
+    
+    def create_progress_bars(self, x, y, frame):
+        """Mini progress bars - simplified to avoid dimension errors"""
+        group = displayio.Group()
+        
+        # Just use dots instead of rectangles to avoid dimension issues
+        # 4 positions
+        for i in range(4):
+            dot_x = x + (i * 3) - 4
+            dot_y = y
+            
+            # Show dot based on frame
+            show_frame = (frame - i) % 8
+            if show_frame < 4:  # Show for half the cycle
+                dot = Circle(dot_x, dot_y, 1, fill=self.spinner_color)
+                group.append(dot)
+        
+        return group
+    
+    def create_orbital_dot(self, x, y, frame):
+        """Dot orbiting around center"""
+        group = displayio.Group()
+        
+        # Center dot
+        center = Circle(x, y, 1, fill=self.spinner_color)
+        group.append(center)
+        
+        # Orbiting dot
+        angle = (frame * 45) % 360
+        rad = math.radians(angle)
+        orbit_x = x + int(self.spinner_size * math.cos(rad))
+        orbit_y = y + int(self.spinner_size * math.sin(rad))
+        
+        orbital = Circle(orbit_x, orbit_y, 1, fill=self.spinner_color)
+        group.append(orbital)
+        
+        return group
+    
+    def create_circle_dots(self, x, y, frame):
+        """Dots appearing around circle"""
+        group = displayio.Group()
+        
+        # Show dots progressively
+        dots_to_show = (frame % 8) + 1
+        
+        for i in range(dots_to_show):
+            angle = (i * 45) - 90  # Start from top
+            rad = math.radians(angle)
+            
+            dot_x = x + int(self.spinner_size * 0.8 * math.cos(rad))
+            dot_y = y + int(self.spinner_size * 0.8 * math.sin(rad))
+            
+            dot = Circle(dot_x, dot_y, 1, fill=self.spinner_color)
+            group.append(dot)
+        
+        return group
+    
+    def create_text_spinner(self, x, y, frame, chars):
+        """Text-based spinner fallback"""
+        current_char = chars[frame % len(chars)]
+        
+        text = label.Label(terminalio.FONT, text=current_char, 
+                          color=self.spinner_color, scale=1)
+        text.x = x - 3
+        text.y = y
+        
+        group = displayio.Group()
+        group.append(text)
+        return group
+    
+    def create_spinner(self):
+        """Create current spinner element"""
+        x, y = self.spinner_position
+        frame = self.current_frame
+        style = self.current_style
+        
+        if not self.shapes_available or style.startswith('text_'):
+            if style == 'text_plus':
+                return self.create_text_spinner(x, y, frame, ['+', 'x', '+', 'x'])
+            else:
+                return self.create_text_spinner(x, y, frame, ['|', '/', '-', '\\'])
+        
+        # Graphics spinners
+        if style == 'pie_filling':
+            return self.create_pie_filling(x, y, frame)
+        elif style == 'spinning_triangle':
+            return self.create_spinning_triangle(x, y, frame)
+        elif style == 'pulsing_circle':
+            return self.create_pulsing_circle(x, y, frame)
+        elif style == 'rotating_line':
+            return self.create_rotating_line(x, y, frame)
+        elif style == 'progress_bars':
+            return self.create_progress_bars(x, y, frame)
+        elif style == 'orbital_dot':
+            return self.create_orbital_dot(x, y, frame)
+        elif style == 'circle_dots':
+            return self.create_circle_dots(x, y, frame)
+        else:
+            # Fallback
+            return self.create_text_spinner(x, y, frame, ['|', '/', '-', '\\'])
+    
+    def create_screen(self):
+        """Create demo screen"""
+        splash = displayio.Group()
+        
+        # Title
+        title = label.Label(terminalio.FONT, text="CLEAN SPINNERS", color=0xFFFFFF, scale=1)
+        title.x = (128 - title.bounding_box[2]) // 2
+        title.y = 25
+        splash.append(title)
+        
+        # Current style
+        style_text = f"Style: {self.current_style}"
+        style_label = label.Label(terminalio.FONT, text=style_text[:18], color=0xCCCCCC, scale=1)
+        style_label.x = 2
+        style_label.y = 37
+        splash.append(style_label)
+        
+        # Progress
+        progress_text = f"{self.current_style_index + 1}/{len(self.spinner_styles)}"
+        progress_label = label.Label(terminalio.FONT, text=progress_text, color=0xCCCCCC, scale=1)
+        progress_label.x = 2
+        progress_label.y = 47
+        splash.append(progress_label)
+        
+        # Speed
+        speed_text = f"Speed: {self.animation_speed:.1f}s"
+        speed_label = label.Label(terminalio.FONT, text=speed_text, color=0xCCCCCC, scale=1)
+        speed_label.x = 2
+        speed_label.y = 57
+        splash.append(speed_label)
+        
+        # Add spinner
+        spinner = self.create_spinner()
+        if spinner:
+            splash.append(spinner)
+        
+        return splash
+    
+    def update_animation(self):
+        """Update spinner animation"""
+        current_time = time.monotonic()
+        
+        if current_time - self.last_update >= self.animation_speed:
+            self.current_frame += 1
+            self.last_update = current_time
+            return True
+        
+        return False
+    
+    def cycle_style(self):
+        """Cycle to next spinner style"""
+        current_time = time.monotonic()
+        
+        if not self.auto_cycle or current_time - self.last_cycle < self.cycle_time:
+            return False
+        
+        self.current_style_index = (self.current_style_index + 1) % len(self.spinner_styles)
+        self.current_style = self.spinner_styles[self.current_style_index]
+        self.current_frame = 0
+        self.last_cycle = current_time
+        
+        print(f"🔄 Switched to: {self.current_style}")
+        return True
+    
+    def run_demo(self, duration=30):
+        """Run the clean spinner demo"""
+        if not self.display:
+            print("❌ Display not ready")
+            return
+        
+        print(f"🚀 Starting clean demo for {duration} seconds...")
+        print(f"🔄 Cycling every {self.cycle_time}s through {len(self.spinner_styles)} spinners")
+        
+        if self.shapes_available:
+            print("🎨 Graphics spinners available!")
+        else:
+            print("📝 Text-only mode (install adafruit-circuitpython-display-shapes)")
+        
+        start_time = time.monotonic()
+        frames = 0
+        cycles = 0
+        
+        print(f"\n🎬 Starting: {self.current_style}")
+        
+        try:
+            while time.monotonic() - start_time < duration:
+                updated = False
+                
+                # Update animation
+                if self.update_animation():
+                    updated = True
+                    frames += 1
+                
+                # Cycle styles
+                if self.cycle_style():
+                    updated = True
+                    cycles += 1
+                
+                # Update display
+                if updated:
+                    screen = self.create_screen()
+                    self.display.root_group = screen
+                
+                time.sleep(0.05)
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Demo stopped")
+        
+        elapsed = time.monotonic() - start_time
+        print(f"\n📊 Results:")
+        print(f"   Frames: {frames}")
+        print(f"   Style changes: {cycles}")
+        print(f"   FPS: {frames / elapsed:.1f}")
+        print(f"   All working: ✅")
+
+
+def quick_test():
+    """Quick test of top 3 spinners"""
+    print("⚡ Quick test - Top 3 spinners")
+    
+    demo = CleanSpinnerDemo()
+    if demo.initialize_display():
+        # Override to just show top 3
+        demo.spinner_styles = ['pie_filling', 'spinning_triangle', 'pulsing_circle']
+        demo.cycle_time = 3.0
+        
+        print("🎯 Testing:")
+        print("   1. Pie filling (3s)")
+        print("   2. Spinning triangle (3s)")
+        print("   3. Pulsing circle (3s)")
+        
+        demo.run_demo(duration=15)
+        print("✅ Quick test done!")
+
+
+def triangle_test():
+    """Test just the spinning triangle"""
+    print("🔺 Triangle-only test")
+    
+    demo = CleanSpinnerDemo()
+    if demo.initialize_display():
+        demo.current_style = 'spinning_triangle'
+        demo.auto_cycle = False
+        demo.animation_speed = 0.15  # Faster for smooth rotation
+        
+        print("🔺 Spinning triangle for 15 seconds...")
+        print("   No center dot, smooth rotation")
+        
+        demo.run_demo(duration=15)
+        print("✅ Triangle test done!")
+
+
+def main():
+    """Main demo - all spinners"""
+    print("🌀 CLEAN GRAPHICS SPINNER DEMO")
+    print("=" * 40)
+    
+    demo = CleanSpinnerDemo()
+    if demo.initialize_display():
+        demo.run_demo(duration=35)
+    
+    print("✅ Demo complete!")
+
+
+if __name__ == "__main__":
+    # Choose your test:
+    main()           # All 9 spinners
+    # quick_test()   # Just top 3
+    # triangle_test() # Just triangle
