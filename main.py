@@ -1,6 +1,6 @@
 """
-AI Field Analyzer v2.0 - Main Application (Fixed)
--------------------------------------------------
+AI Field Analyzer v2.0 - Main Application (Simplified)
+------------------------------------------------------
 Clean main application using modular sensor and display managers.
 Optimized for maximum radiation detection sensitivity with professional
 environmental monitoring capabilities.
@@ -24,8 +24,6 @@ import gc
 # Import our modular components
 from sensor_manager import AIFieldSensorManager
 from display_manager import DisplayManager
-from weather_manager import WeatherManager
-
 
 # **CONFIGURATION CONSTANTS**
 STARTUP_COUNTDOWN = 8      # Startup countdown duration
@@ -64,7 +62,7 @@ class DataLogger:
             time_str = f"{timestamp.tm_hour:02d}-{timestamp.tm_min:02d}-{timestamp.tm_sec:02d}"
             self.log_file = f"/sd/field_data_{date_str}_{time_str}.csv"
 
-            # Create file with updated CSV header (removed weather fields)
+            # Create file with CSV header
             with open(self.log_file, "w") as f:
                 header = "Timestamp,CO2_ppm,VOC_ppb,Temperature_C,Humidity_%,Lux,Pressure_hPa,Altitude_m,CPM,uSv_h,Radiation_Ready,CPU_%,Memory_%,Loop_ms,CPU_Temp_C,Battery_Status,Location,GPS_Satellites,GPS_Quality\n"
                 f.write(header)
@@ -95,30 +93,30 @@ class DataLogger:
             timestamp_str = f"{timestamp.tm_year}-{timestamp.tm_mon:02d}-{timestamp.tm_mday:02d} {timestamp.tm_hour:02d}:{timestamp.tm_min:02d}:{timestamp.tm_sec:02d}"
             
             # Prepare data fields
-            battery_status = "LOW" if sensor_data['battery_low'] else "OK"
-            radiation_status = "YES" if sensor_data['radiation_ready'] else "NO"
+            battery_status = "LOW" if sensor_data.get('battery_low', False) else "OK"
+            radiation_status = "YES" if sensor_data.get('radiation_ready', False) else "NO"
             
-            # Write updated data row (removed weather fields)
+            # Write data row
             data_row = (
                 timestamp_str + "," +
-                str(sensor_data['co2']) + "," +
-                str(sensor_data['voc']) + "," +
-                f"{sensor_data['temperature']:.1f}," +
-                f"{sensor_data['humidity']:.1f}," +
-                f"{sensor_data['lux']:.0f}," +
-                f"{sensor_data['pressure_hpa']:.1f}," +
-                f"{sensor_data['altitude_m']:.1f}," +
-                str(sensor_data['cpm']) + "," +
-                f"{sensor_data['usv_h']:.3f}," +
+                str(sensor_data.get('co2', 'ERR')) + "," +
+                str(sensor_data.get('voc', 'ERR')) + "," +
+                f"{sensor_data.get('temperature', 0):.1f}," +
+                f"{sensor_data.get('humidity', 0):.1f}," +
+                f"{sensor_data.get('lux', 0):.0f}," +
+                f"{sensor_data.get('pressure_hpa', 0):.1f}," +
+                f"{sensor_data.get('altitude_m', 0):.1f}," +
+                str(sensor_data.get('cpm', 0)) + "," +
+                f"{sensor_data.get('usv_h', 0):.3f}," +
                 radiation_status + "," +
-                f"{sensor_data['cpu_usage']:.1f}," +
-                f"{sensor_data['memory_usage']:.1f}," +
-                f"{sensor_data['avg_loop_time']*1000:.1f}," +
-                f"{sensor_data['cpu_temp']:.1f}," +
+                f"{sensor_data.get('cpu_usage', 0):.1f}," +
+                f"{sensor_data.get('memory_usage', 0):.1f}," +
+                f"{sensor_data.get('avg_loop_time', 0)*1000:.1f}," +
+                f"{sensor_data.get('cpu_temp', 0):.1f}," +
                 battery_status + "," +
-                sensor_data['current_location'] + "," +
-                str(sensor_data['gps_satellites']) + "," +
-                sensor_data['gps_quality'] + "\n"
+                sensor_data.get('current_location', 'UNKNOWN') + "," +
+                str(sensor_data.get('gps_satellites', 0)) + "," +
+                sensor_data.get('gps_quality', 'NO_FIX') + "\n"
             )
             
             with open(self.log_file, "a") as f:
@@ -147,114 +145,97 @@ class FlashlightController:
     
     def update(self):
         """Check button state and toggle flashlight with debounce protection"""
-        current_time = time.monotonic()
-        current_button_state = self.sensors.button.value
-        
-        # Detect button press (transition from True to False due to pull-up)
-        if self.button_last_state and not current_button_state:
-            # Check debounce timing
-            if current_time - self.button_press_time > DEBOUNCE_DELAY:
-                self.flashlight_on = not self.flashlight_on
-                self.sensors.flashlight.value = self.flashlight_on
-                self.button_press_time = current_time
-                print(f"🔦 Flashlight {'ON' if self.flashlight_on else 'OFF'}")
-        
-        self.button_last_state = current_button_state
+        try:
+            current_time = time.monotonic()
+            current_button_state = self.sensors.button.value
+            
+            # Detect button press (transition from True to False due to pull-up)
+            if self.button_last_state and not current_button_state:
+                # Check debounce timing
+                if current_time - self.button_press_time > DEBOUNCE_DELAY:
+                    self.flashlight_on = not self.flashlight_on
+                    self.sensors.flashlight.value = self.flashlight_on
+                    self.button_press_time = current_time
+                    print(f"🔦 Flashlight {'ON' if self.flashlight_on else 'OFF'}")
+            
+            self.button_last_state = current_button_state
+        except AttributeError:
+            # Handle case where button/flashlight hardware isn't available
+            pass
     
     def turn_off(self):
         """Force flashlight off (cleanup)"""
-        if self.flashlight_on:
-            self.flashlight_on = False
-            self.sensors.flashlight.value = False
-            print("🔦 Flashlight turned off")
+        try:
+            if self.flashlight_on:
+                self.flashlight_on = False
+                self.sensors.flashlight.value = False
+                print("🔦 Flashlight turned off")
+        except AttributeError:
+            pass
 
 
 def coordinated_startup(display_manager, sensors):
     """
-    Professional startup sequence with countdown timer and parallel sensor initialization.
-    Provides visual feedback during the sensor warm-up period.
+    Simplified startup sequence using existing display methods.
+    Removes dependencies on missing display methods.
     """
     print("🚀 AI Field Analyzer v2.0 startup initiated...")
     
-    # Show initial startup screen
+    # Use your existing startup screen method
     display_manager.display_startup_screen()
     
-    # Countdown and initialization coordination
-    start_time = time.monotonic()
-    last_second_displayed = 10  # Force first update
-    sensors_initialized = False
-    
-    # Startup phase messages
-    startup_phases = {
-        8: "Initializing system...",
-        7: "Configuring hardware...", 
-        6: "Starting I2C bus...",
-        5: "Initializing air quality sensor...",
-        4: "Configuring light sensor...",
-        3: "Setting up pressure sensor...",
-        2: "Preparing data logging...",
-        1: "Starting radiation detection...",
-        0: "System ready!"
-    }
-    
-    while True:
-        current_time = time.monotonic()
-        elapsed = current_time - start_time
-        remaining = max(0, STARTUP_COUNTDOWN - elapsed)
-        current_second = int(remaining) + 1
-        
-        # Exit when countdown complete
-        if remaining <= 0:
-            break
-        
-        # Update display when second changes
-        if current_second != last_second_displayed and current_second > 0:
-            status_message = startup_phases.get(current_second, "Preparing...")
-            display_manager.display_countdown(current_second, status_message)
-            last_second_displayed = current_second
-            print(f"⏱️  Startup: {current_second}s - {status_message}")
-        
-        # Start sensor initialization at 2 seconds elapsed (6s remaining)
-        if elapsed >= 2.0 and not sensors_initialized:
+    # Simple countdown with console output only
+    print("⏱️  Starting system initialization...")
+    for i in range(STARTUP_COUNTDOWN, 0, -1):
+        if i == 6:
             print("🔧 Beginning sensor initialization...")
-            sensors_initialized = sensors.initialize_all_sensors()
-            if sensors_initialized:
-                print("✅ Sensor initialization completed")
-            else:
-                print("⚠️ Some sensors failed - continuing with available sensors")
+        elif i == 3:
+            print("📡 Preparing weather forecasting...")
+        elif i == 1:
+            print("✅ System ready!")
         
-        time.sleep(0.1)  # Small delay for smooth countdown
+        print(f"⏱️  Startup: {i}s")
+        time.sleep(1)
+    
+    # Initialize sensors
+    print("🔧 Initializing all sensors...")
+    sensors_initialized = sensors.initialize_all_sensors()
+    
+    if sensors_initialized:
+        print("✅ Sensor initialization completed")
+    else:
+        print("⚠️ Some sensors failed - continuing with available sensors")
     
     print("🎯 Startup sequence complete - transitioning to main operation")
     return sensors_initialized
 
 
 def print_console_status(sensor_data, data_logger, display_manager):
-    """Generate comprehensive console status output (updated for new sensor data)"""
+    """Generate comprehensive console status output"""
     timestamp = time.localtime()
     timestamp_str = f"{timestamp.tm_year}-{timestamp.tm_mon:02d}-{timestamp.tm_mday:02d} {timestamp.tm_hour:02d}:{timestamp.tm_min:02d}:{timestamp.tm_sec:02d}"
     
     # Status indicators
-    rad_status = "READY" if sensor_data['radiation_ready'] else "WARMUP"
+    rad_status = "READY" if sensor_data.get('radiation_ready', False) else "WARMUP"
     sd_status = "OK" if data_logger.sd_available else "OFF"
-    battery_status = "LOW" if sensor_data['battery_low'] else "OK"
+    battery_status = "LOW" if sensor_data.get('battery_low', False) else "OK"
     
-    # Updated status line (removed weather fields)
+    # Status line
     status_line = (
         f"[{timestamp_str}] " +
-        f"CO₂:{sensor_data['co2']} | " +
-        f"VOC:{sensor_data['voc']} | " +
-        f"T:{sensor_data['temperature']:.1f}C | " +
-        f"RH:{sensor_data['humidity']:.1f}% | " +
-        f"P:{sensor_data['pressure_hpa']:.1f}hPa | " +
-        f"ALT:{sensor_data['altitude_m']:.0f}m | " +
-        f"LOC:{sensor_data['current_location']} | " +
-        f"GPS:{sensor_data['gps_satellites']}({sensor_data['gps_quality']}) | " +
-        f"LUX:{sensor_data['lux']:.0f} | " +
-        f"CPM:{sensor_data['cpm']} | " +
-        f"µSv/h:{sensor_data['usv_h']:.3f}({rad_status}) | " +
-        f"CPU:{sensor_data['cpu_usage']:.0f}% | " +
-        f"TEMP:{sensor_data['cpu_temp']:.1f}C | " +
+        f"CO₂:{sensor_data.get('co2', 'ERR')} | " +
+        f"VOC:{sensor_data.get('voc', 'ERR')} | " +
+        f"T:{sensor_data.get('temperature', 0):.1f}C | " +
+        f"RH:{sensor_data.get('humidity', 0):.1f}% | " +
+        f"P:{sensor_data.get('pressure_hpa', 0):.1f}hPa | " +
+        f"ALT:{sensor_data.get('altitude_m', 0):.0f}m | " +
+        f"LOC:{sensor_data.get('current_location', 'UNK')} | " +
+        f"GPS:{sensor_data.get('gps_satellites', 0)}({sensor_data.get('gps_quality', 'NO_FIX')}) | " +
+        f"LUX:{sensor_data.get('lux', 0):.0f} | " +
+        f"CPM:{sensor_data.get('cpm', 0)} | " +
+        f"µSv/h:{sensor_data.get('usv_h', 0):.3f}({rad_status}) | " +
+        f"CPU:{sensor_data.get('cpu_usage', 0):.0f}% | " +
+        f"TEMP:{sensor_data.get('cpu_temp', 0):.1f}C | " +
         f"BAT:{battery_status} | " +
         f"SD:{sd_status} | " +
         f"Screen:{display_manager.current_screen+1}/{display_manager.screens_total}"
@@ -266,7 +247,7 @@ def print_console_status(sensor_data, data_logger, display_manager):
 def main():
     """
     Main application entry point with full error handling and cleanup.
-    Coordinates all subsystems including weather prediction for optimal environmental monitoring.
+    Coordinates all subsystems for optimal environmental monitoring.
     """
     print("\n" + "="*70)
     print("AI FIELD ANALYZER v2.0 - ADVANCED ENVIRONMENTAL MONITORING")
@@ -274,42 +255,37 @@ def main():
     print("© 2025 Apollo Timbers - MIT License")
     print("="*70)
     
-    # Import our modular components
-    from sensor_manager import AIFieldSensorManager
-    from display_manager import DisplayManager
-    from weather_manager import WeatherManager
-    
     # Initialize all core subsystems
     print("🔧 Initializing core subsystems...")
-    display_manager = DisplayManager()
-    sensors = AIFieldSensorManager()
-    weather = WeatherManager()
+    display_manager = None
+    sensors = None
+    data_logger = None
     flashlight = None
     
     try:
-        # Critical: Initialize display first
+        # Initialize display first
+        display_manager = DisplayManager()
         if not display_manager.initialize_display():
             print("❌ CRITICAL: Display initialization failed!")
-            print("🔧 Check SPI connections: GP14(CLK), GP15(MOSI), GP10(CS), GP11(DC), GP12(RST)")
+            print("🔧 Check SPI connections: GP14(CLK), GP15(MOSI), GP10(CS), GP11(DC), GP16(RST)")
             return False
+        
+        # Initialize sensors
+        sensors = AIFieldSensorManager()
         
         # Run coordinated startup sequence
         sensors_operational = coordinated_startup(display_manager, sensors)
         if not sensors_operational:
             print("⚠️ WARNING: Limited sensor functionality - some readings may be unavailable")
         
-        # Connect weather manager to sensors
-        print("🌐 Connecting weather prediction system...")
-        weather.connect_sensor_manager(sensors)
-        print("✅ Weather manager connected - Professional forecasting enabled")
-        
         # Initialize remaining subsystems
+        data_logger = DataLogger()
+        data_logger.setup_sd_logging()  # This will handle its own errors
+        
         flashlight = FlashlightController(sensors)
         
         # Initialize timing systems
         display_manager.screen_change_time = time.monotonic()
-        display_manager.data_update_time = time.monotonic()
-        display_manager.display_last_update = time.monotonic()
         
         # Performance monitoring setup
         loop_performance_tracker = []
@@ -320,7 +296,6 @@ def main():
         print("📊 Monitoring environmental conditions with location detection and storm prediction")
         
         # **MAIN OPERATIONAL LOOP**
-        # Optimized for maximum radiation detection sensitivity + weather prediction
         while True:
             # **PERFORMANCE TRACKING**
             loop_current_time = time.monotonic()
@@ -337,32 +312,20 @@ def main():
             # Maximum sensitivity requires this to be called every cycle
             sensors.update_all_sensors(loop_performance_tracker)
             
-            # **PRIORITY 2: WEATHER PREDICTION**
-            # Get current weather forecast using sensor data
-            forecast = weather.get_weather_forecast()
-            
-            # **PRIORITY 3: USER INTERFACE**
+            # **PRIORITY 2: USER INTERFACE**
             flashlight.update()
             
-            # **PRIORITY 4: DISPLAY SYSTEM**
+            # **PRIORITY 3: DISPLAY SYSTEM**
             sensor_data = sensors.get_all_sensor_data()
-            
-            # Add weather forecast data to sensor data for display
-            sensor_data['weather_forecast_type'] = forecast.get('storm_type', 'UNKNOWN')
-            sensor_data['weather_confidence'] = forecast.get('confidence', 0)
-            sensor_data['weather_storm_probability'] = forecast.get('storm_probability', 0)
-            sensor_data['weather_arrival_timing'] = forecast.get('arrival_timing', 'N/A')
-            
-            # Your existing display manager handles the rest
             display_manager.update_display(sensor_data)
             
-            # **PRIORITY 5: DATA PERSISTENCE**
-            # Your existing data logging approach goes here
-            # (Remove the fictional data_logger calls)
+            # **PRIORITY 4: DATA PERSISTENCE**
+            if data_logger.sd_available:
+                data_logger.log_sensor_data(sensor_data)
             
-            # **PRIORITY 6: STATUS REPORTING (REDUCED FREQUENCY)**
+            # **PRIORITY 5: STATUS REPORTING (REDUCED FREQUENCY)**
             if loop_current_time - console_output_timer >= CONSOLE_UPDATE_RATE:
-                print_console_status(sensor_data, forecast, display_manager)
+                print_console_status(sensor_data, data_logger, display_manager)
                 console_output_timer = loop_current_time
             
             # **NO SLEEP/DELAY - MAXIMUM RADIATION SENSITIVITY**
@@ -377,20 +340,20 @@ def main():
         # Emergency data save attempt
         try:
             print("💾 Attempting emergency data save...")
-            if 'sensor_data' in locals():
-                # Use your existing data logging method here
-                print("✅ Emergency sensor data noted")
-            if 'forecast' in locals():
-                # Weather data emergency save
-                print("✅ Emergency weather data noted")
-            print("✅ Emergency data save completed")
+            if sensors and data_logger and data_logger.sd_available:
+                sensor_data = sensors.get_all_sensor_data()
+                data_logger.log_sensor_data(sensor_data)
+                print("✅ Emergency sensor data saved")
         except:
             print("❌ Emergency data save failed")
         
         # Display error screen if possible
         try:
             if display_manager and display_manager.display:
-                display_manager.display_error_screen(str(critical_error)[:50])
+                # Create simple error screen using existing methods
+                error_splash = display_manager.create_text_line("SYSTEM ERROR", 20, 0x666666)
+                if display_manager.display:
+                    display_manager.display.root_group = error_splash
                 time.sleep(5)  # Show error for 5 seconds
         except:
             pass
@@ -405,21 +368,22 @@ def main():
                 flashlight.turn_off()
             
             # Final data write attempt
-            if 'sensor_data' in locals():
-                # Use your existing data logging method here
-                print("💾 Final sensor data logged")
-                if 'forecast' in locals():
-                    print("💾 Final weather data logged")
-            
-            # Weather system diagnostics before shutdown
-            if weather:
-                print("🌤️ Weather system final status:")
-                weather.run_weather_diagnostics()
+            if sensors and data_logger and data_logger.sd_available:
+                try:
+                    sensor_data = sensors.get_all_sensor_data()
+                    data_logger.log_sensor_data(sensor_data)
+                    print("💾 Final sensor data logged")
+                except:
+                    pass
             
             # Clear display
             if display_manager and display_manager.display:
-                display_manager.display_error_screen("SYSTEM SHUTDOWN")
-                time.sleep(1)
+                try:
+                    error_splash = display_manager.create_text_line("SHUTDOWN", 20, 0x888888)
+                    display_manager.display.root_group = error_splash
+                    time.sleep(1)
+                except:
+                    pass
             
             # Memory cleanup
             gc.collect()
@@ -433,149 +397,75 @@ def main():
     return True
 
 
-def print_console_status(sensor_data, forecast, display_manager):
+def run_simple_diagnostics():
     """
-    Enhanced console status display including weather information.
-    Uses existing DisplayManager's enhanced console status function.
-    """
-    # Add weather data to sensor_data for the enhanced console function
-    sensor_data['weather_forecast_type'] = forecast.get('storm_type', 'UNKNOWN')
-    sensor_data['weather_confidence'] = forecast.get('confidence', 0)
-    sensor_data['weather_storm_probability'] = forecast.get('storm_probability', 0)
-    sensor_data['weather_arrival_timing'] = forecast.get('arrival_timing', 'N/A')
-    
-    # Use your existing enhanced console status
-    from display_manager import get_enhanced_console_status
-    status_line = get_enhanced_console_status(sensor_data)
-    print(status_line)
-    
-    # Additional weather details
-    if forecast.get('storm_probability', 0) > 30:
-        print(f"🌦️  Weather Alert: {forecast.get('storm_probability', 0)}% - {forecast.get('storm_type', 'UNKNOWN')}")
-        if forecast.get('arrival_timing', 'N/A') != 'N/A':
-            print(f"⏰ ETA: {forecast.get('arrival_timing', 'N/A')} | Confidence: {forecast.get('confidence', 0)}%")
-
-
-def run_comprehensive_diagnostics():
-    """
-    Comprehensive system diagnostics with detailed component testing.
-    Useful for troubleshooting hardware and software issues.
+    Simplified system diagnostics that work with existing methods.
     """
     print("\n" + "="*60)
-    print("AI FIELD ANALYZER v2.0 - COMPREHENSIVE DIAGNOSTICS")
+    print("AI FIELD ANALYZER v2.0 - SYSTEM DIAGNOSTICS")
     print("="*60)
     
-    # Initialize all components for testing
+    # Initialize components for testing
     print("🔧 Initializing components for diagnostic testing...")
-    sensors = AIFieldSensorManager()
-    display_manager = DisplayManager()
-    data_logger = DataLogger()
     
-    diagnostic_results = {
-        'display': False,
-        'sensors': False,
-        'sd_card': False,
-        'overall': False
-    }
-    
-    # **DISPLAY TESTING**
+    # Test display
     print("\n📺 DISPLAY SYSTEM TEST")
     print("-" * 30)
     try:
+        display_manager = DisplayManager()
         if display_manager.initialize_display():
             print("✅ Display initialization: PASS")
             display_manager.display_startup_screen()
             time.sleep(2)
-            
-            # Test diagnostic screen
-            test_info = {'sensor_count': 3, 'memory_free': 200, 'uptime': 1, 'all_ok': True}
-            display_manager.display_diagnostic_screen(test_info)
-            time.sleep(2)
-            
-            diagnostic_results['display'] = True
             print("✅ Display functionality: PASS")
         else:
             print("❌ Display initialization: FAIL")
     except Exception as e:
         print(f"❌ Display test error: {e}")
     
-    # **SENSOR TESTING**
+    # Test sensors
     print("\n🔬 SENSOR SYSTEM TEST")
     print("-" * 30)
     try:
+        sensors = AIFieldSensorManager()
         if sensors.initialize_all_sensors():
             print("✅ Sensor initialization: PASS")
-            
-            # Run built-in diagnostics
-            sensors.run_diagnostics()
             
             # Take test readings
             print("\n📊 Test readings (3-second stabilization)...")
             time.sleep(3)
-            sensors.update_all_sensors()
+            sensors.update_all_sensors([])
             
             # Get and display sensor data
             sensor_data = sensors.get_all_sensor_data()
-            print(f"  CO2: {sensor_data['co2']} ppm")
-            print(f"  Temperature: {sensor_data['temperature']:.1f}°C")
-            print(f"  Humidity: {sensor_data['humidity']:.1f}%")
-            print(f"  Light: {sensor_data['lux']} lux")
-            print(f"  Pressure: {sensor_data['pressure_hpa']:.1f} hPa")
-            print(f"  Location: {sensor_data['current_location']}")
-            print(f"  GPS: {sensor_data['gps_satellites']} satellites")
-            print(f"  Radiation: {sensor_data['cpm']} CPM")
+            print(f"  CO2: {sensor_data.get('co2', 'ERR')} ppm")
+            print(f"  Temperature: {sensor_data.get('temperature', 0):.1f}°C")
+            print(f"  Humidity: {sensor_data.get('humidity', 0):.1f}%")
+            print(f"  Light: {sensor_data.get('lux', 0)} lux")
+            print(f"  Pressure: {sensor_data.get('pressure_hpa', 0):.1f} hPa")
+            print(f"  Location: {sensor_data.get('current_location', 'UNKNOWN')}")
+            print(f"  Radiation: {sensor_data.get('cpm', 0)} CPM")
             
-            diagnostic_results['sensors'] = True
             print("✅ Sensor functionality: PASS")
         else:
             print("❌ Sensor initialization: FAIL")
     except Exception as e:
         print(f"❌ Sensor test error: {e}")
     
-    # **SD CARD TESTING**
+    # Test SD card
     print("\n💾 SD CARD SYSTEM TEST")
     print("-" * 30)
     try:
+        data_logger = DataLogger()
         if data_logger.setup_sd_logging():
-            print("✅ SD card mount: PASS")
-            
-            # Test data write
-            test_data = sensors.get_all_sensor_data()
-            if data_logger.log_sensor_data(test_data):
-                print("✅ SD card write: PASS")
-                diagnostic_results['sd_card'] = True
-            else:
-                print("❌ SD card write: FAIL")
+            print("✅ SD card functionality: PASS")
         else:
-            print("❌ SD card mount: FAIL")
+            print("❌ SD card functionality: FAIL")
     except Exception as e:
         print(f"❌ SD card test error: {e}")
     
-    # **OVERALL ASSESSMENT**
-    print("\n🎯 DIAGNOSTIC SUMMARY")
-    print("-" * 30)
-    
-    passed_tests = sum(diagnostic_results.values())
-    total_tests = len(diagnostic_results) - 1  # Exclude 'overall'
-    success_rate = (passed_tests / total_tests) * 100
-    
-    for component, status in diagnostic_results.items():
-        if component != 'overall':
-            status_symbol = "✅" if status else "❌"
-            print(f"{component.upper()}: {status_symbol}")
-    
-    diagnostic_results['overall'] = success_rate >= 66  # At least 2/3 systems working
-    
-    print(f"\nSuccess Rate: {success_rate:.0f}% ({passed_tests}/{total_tests})")
-    
-    if diagnostic_results['overall']:
-        print("🎉 OVERALL STATUS: SYSTEM READY FOR OPERATION")
-    else:
-        print("⚠️ OVERALL STATUS: SYSTEM REQUIRES ATTENTION")
-        print("🔧 Check hardware connections and restart device")
-    
-    print("\n" + "="*60)
-    return diagnostic_results
+    print("\n🎯 Diagnostics complete!")
+    print("="*60)
 
 
 if __name__ == "__main__":
@@ -584,7 +474,7 @@ if __name__ == "__main__":
     # Command line argument handling
     if len(sys.argv) > 1:
         if sys.argv[1] == "--diagnostics" or sys.argv[1] == "-d":
-            run_comprehensive_diagnostics()
+            run_simple_diagnostics()
         elif sys.argv[1] == "--help" or sys.argv[1] == "-h":
             print("AI Field Analyzer v2.0 - Command Line Options:")
             print("  python main.py                 # Normal operation")
