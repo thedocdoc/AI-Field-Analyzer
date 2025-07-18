@@ -1,6 +1,6 @@
 Renamed ATLAS (Advanced Tactical Laboratory and Analysis System)
 
-# AI-Field-Analyzer
+# ATLAS
 See Project @ https://hackaday.io/project/203273-ai-field-analyzer
 
 My version of a Tricorder, Rads, CO2, VOCs, pressure, temp, humidity, light, sound, and magnetic. Gives real feedback via onboard AI
